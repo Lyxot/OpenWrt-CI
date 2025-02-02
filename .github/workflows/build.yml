@@ -1,0 +1,123 @@
+name: OpenWrt-CI
+
+on:
+  workflow_dispatch:
+    inputs:
+      enable_debug:
+        description: 'Enable Debug Session'
+        required: false
+        type: boolean
+        default: false
+  schedule:
+    - cron: '0 20 */3 * *'
+
+jobs:
+  build_openwrt:
+    name: Build OpenWrt Firmware
+    runs-on: ubuntu-22.04
+    steps:
+      - name: Set Swap Space
+        uses: pierotofy/set-swap-space@master
+        with:
+          swap-size-gb: 64
+
+      - name: Set tmpfs
+        run: sudo mount -t tmpfs -o size=64G tmpfs .
+
+      - name: Checkout OpenWrt
+        uses: actions/checkout@v4
+        with:
+          repository: coolsnowwolf/lede
+
+      - name: Restore cache
+        uses: actions/cache/restore@v4
+        with:
+          path: |
+            ./.ccache
+            ./staging_dir
+            ./build_dir
+            ./commit_id
+          key: lede-ccache
+
+      - name: Check update
+        id: check-update
+        run: |
+          export current_id=$(cat commit_id)
+          export latest_id=$(git rev-parse HEAD)
+          if [ "$current_id" != "$latest_id" ]; then
+            echo update=true >> $GITHUB_OUTPUT
+          else
+            echo update=false >> $GITHUB_OUTPUT
+          fi
+
+      - name: Initialization environment
+        env:
+          DEBIAN_FRONTEND: noninteractive
+        id: init-env
+        run: |
+          sudo -E apt update
+          sudo -E apt -y install ack antlr3 asciidoc autoconf automake autopoint binutils bison build-essential bzip2 ccache clang cmake cpio curl device-tree-compiler flex gawk gcc-multilib g++-multilib gettext genisoimage git gperf haveged help2man intltool libc6-dev-i386 libelf-dev libfuse-dev libglib2.0-dev libgmp3-dev libltdl-dev libmpc-dev libmpfr-dev libncurses5-dev libncursesw5-dev libpython3-dev libreadline-dev libssl-dev libtool llvm lrzsz msmtp ninja-build p7zip p7zip-full patch pkgconf python3 python3-pyelftools python3-setuptools qemu-utils rsync scons squashfs-tools subversion swig texinfo uglifyjs upx-ucl unzip vim wget xmlto xxd zlib1g-dev
+          sudo -E timedatectl set-timezone "Asia/Shanghai"
+          echo cache-key=lede-ccache-$(git rev-parse HEAD) >> $GITHUB_OUTPUT
+
+      - name: Setup Debug Session
+        if: github.event.inputs.enable_debug == 'true'
+        uses: mxschmitt/action-tmate@v3
+
+      - name: Update feeds
+        run: |
+          ./scripts/feeds update -a
+          # 添加 EasyTier
+          git clone https://github.com/EasyTier/luci-app-easytier.git --depth=1
+          cp -r luci-app-easytier/luci-app-easytier feeds/luci/applications
+          rm -rf luci-app-easytier
+          ./scripts/feeds update -a
+          ./scripts/feeds install -a
+          
+      - name: Generate configuration file
+        run: |
+          wget $GITHUB_SERVER_URL/$GITHUB_REPOSITORY/raw/refs/heads/main/.config
+          make defconfig
+
+      - name: Compile OpenWrt
+        id: compile
+        if: steps.check-update.outputs.update != 'false' || github.event_name == 'workflow_dispatch'
+        run: |
+          make download -j$(nproc)
+          make V=s -j$(nproc) || make V=s -j$(nproc) || make V=s -j1
+          echo compile-status=success >> $GITHUB_OUTPUT
+          rm -rf staging_dir/target*
+          rm -rf build_dir/target*
+          echo $(git rev-parse HEAD) > commit_id
+
+      - name: Upload buildinfo
+        if: steps.compile.outputs.compile-status == 'success'
+        uses: actions/upload-artifact@v4
+        with:
+          name: OpenWrt_buildinfo
+          path: ./bin/targets/x86/64/*.buildinfo
+
+      - name: Upload Rootfs
+        if: steps.compile.outputs.compile-status == 'success'
+        uses: actions/upload-artifact@v4
+        with:
+          name: OpenWrt_Rootfs
+          path: ./bin/targets/x86/64/openwrt-x86-64-generic-rootfs.tar.gz
+
+      - name: Upload Qcow2
+        if: steps.compile.outputs.compile-status == 'success'
+        uses: actions/upload-artifact@v4
+        with:
+          name: OpenWrt_Qcow2
+          path: ./bin/targets/x86/64/openwrt-x86-64-generic-squashfs-combined-efi.qcow2
+
+      - name: Save cache
+        if: steps.compile.outputs.compile-status == 'success'
+        uses: actions/cache/save@v4
+        with:
+          path: |
+            ./.ccache
+            ./staging_dir
+            ./build_dir
+            ./commit_id
+          key: ${{ steps.init-env.outputs.cache-key }}
