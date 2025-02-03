@@ -89,6 +89,7 @@ jobs:
           rm -rf staging_dir/target*
           rm -rf build_dir/target*
           echo $(git rev-parse HEAD) > commit_id
+          ls bin/targets/x86/64
 
       - name: Upload buildinfo
         if: steps.compile.outputs.compile-status == 'success'
@@ -97,19 +98,17 @@ jobs:
           name: OpenWrt_buildinfo
           path: ./bin/targets/x86/64/*.buildinfo
 
-      - name: Upload Rootfs
+      - name: Upload Images
         if: steps.compile.outputs.compile-status == 'success'
         uses: actions/upload-artifact@v4
         with:
-          name: OpenWrt_Rootfs
-          path: ./bin/targets/x86/64/openwrt-x86-64-generic-rootfs.tar.gz
-
-      - name: Upload Qcow2
-        if: steps.compile.outputs.compile-status == 'success'
-        uses: actions/upload-artifact@v4
-        with:
-          name: OpenWrt_Qcow2
-          path: ./bin/targets/x86/64/openwrt-x86-64-generic-squashfs-combined-efi.qcow2
+          name: OpenWrt_Images
+          path: |
+            ./bin/targets/x86/64/*.gz
+            ./bin/targets/x86/64/*.qcow2
+            ./bin/targets/x86/64/*.vdi
+            ./bin/targets/x86/64/*.vmdk
+            ./bin/targets/x86/64/*.vhdx
 
       - name: Save cache
         if: steps.compile.outputs.compile-status == 'success'
