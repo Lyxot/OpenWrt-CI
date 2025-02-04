@@ -37,6 +37,7 @@ jobs:
             ./staging_dir
             ./build_dir
             ./commit_id
+            ./dl
           key: lede-ccache
 
       - name: Check update
@@ -68,7 +69,7 @@ jobs:
         run: |
           ./scripts/feeds update -a
           # 添加 EasyTier
-          git clone https://github.com/EasyTier/luci-app-easytier.git --depth=1
+          git clone $GITHUB_SERVER_URL/EasyTier/luci-app-easytier.git --depth=1
           cp -r luci-app-easytier/luci-app-easytier feeds/luci/applications
           rm -rf luci-app-easytier
           ./scripts/feeds update -a
@@ -79,13 +80,22 @@ jobs:
           wget $GITHUB_SERVER_URL/$GITHUB_REPOSITORY/raw/refs/heads/main/.config
           make defconfig
 
+      - name: Download packages
+        run: |
+          make download V=s -j$(nproc)
+
       - name: Compile OpenWrt
         id: compile
         if: steps.check-update.outputs.update != 'false' || github.event_name == 'workflow_dispatch'
         run: |
-          make download -j$(nproc)
           make V=s -j$(nproc) || make V=s -j$(nproc) || make V=s -j1
           echo compile-status=success >> $GITHUB_OUTPUT
+          echo release-tag=$(cat bin/targets/x86/64/version.buildinfo) >> $GITHUB_OUTPUT
+          echo "**Full Changelog**: $GITHUB_SERVER_URL/coolsnowwolf/lede/compare/$(cat commit_id)...$(git rev-parse HEAD)" > changelog.md
+      
+      - name: Clean up
+        if: steps.compile.outputs.compile-status == 'success'
+        run: |
           rm -rf staging_dir/target*
           rm -rf build_dir/target*
           echo $(git rev-parse HEAD) > commit_id
@@ -98,17 +108,44 @@ jobs:
           name: OpenWrt_buildinfo
           path: ./bin/targets/x86/64/*.buildinfo
 
-      - name: Upload Images
+      - name: Upload ext4 efi images
         if: steps.compile.outputs.compile-status == 'success'
         uses: actions/upload-artifact@v4
         with:
-          name: OpenWrt_Images
+          name: OpenWrt_ext4_efi_images
           path: |
-            ./bin/targets/x86/64/*.gz
-            ./bin/targets/x86/64/*.qcow2
-            ./bin/targets/x86/64/*.vdi
-            ./bin/targets/x86/64/*.vmdk
-            ./bin/targets/x86/64/*.vhdx
+            ./bin/targets/x86/64/openwrt-x86-64-generic-ext4-combined-efi.*
+
+      - name: Upload ext4 images
+        if: steps.compile.outputs.compile-status == 'success'
+        uses: actions/upload-artifact@v4
+        with:
+          name: OpenWrt_ext4_images
+          path: |
+            ./bin/targets/x86/64/openwrt-x86-64-generic-ext4-combined.*
+
+      - name: Upload squashfs efi images
+        if: steps.compile.outputs.compile-status == 'success'
+        uses: actions/upload-artifact@v4
+        with:
+          name: OpenWrt_squashfs_efi_images
+          path: |
+            ./bin/targets/x86/64/openwrt-x86-64-generic-squashfs-combined-efi.*
+
+      - name: Upload squashfs images
+        if: steps.compile.outputs.compile-status == 'success'
+        uses: actions/upload-artifact@v4
+        with:
+          name: OpenWrt_squashfs_images
+          path: |
+            ./bin/targets/x86/64/openwrt-x86-64-generic-squashfs-combined.*
+
+      - name: Upload rootfs
+        if: steps.compile.outputs.compile-status == 'success'
+        uses: actions/upload-artifact@v4
+        with:
+          name: OpenWrt_rootfs
+          path: ./bin/targets/x86/64/openwrt-x86-64-generic-rootfs.tar.gz
 
       - name: Save cache
         if: steps.compile.outputs.compile-status == 'success'
@@ -119,4 +156,25 @@ jobs:
             ./staging_dir
             ./build_dir
             ./commit_id
+            ./dl
           key: ${{ steps.init-env.outputs.cache-key }}
+
+      - name: Prepare release
+        if: steps.compile.outputs.compile-status == 'success'
+        run: |
+          mkdir -p release
+          mv ./bin/targets/x86/64/openwrt-x86-64-generic-ext4-combined-efi.* release/
+          mv ./bin/targets/x86/64/openwrt-x86-64-generic-ext4-combined.* release/
+          mv ./bin/targets/x86/64/openwrt-x86-64-generic-squashfs-combined-efi.* release/
+          mv ./bin/targets/x86/64/openwrt-x86-64-generic-squashfs-combined.* release/
+          mv ./bin/targets/x86/64/openwrt-x86-64-generic-rootfs.tar.gz release/
+
+      - name: Release
+        if: steps.compile.outputs.compile-status == 'success'
+        uses: ncipollo/release-action@v1
+        with:
+          allowUpdates: true
+          bodyFile: "changelog.md"
+          tag: ${{ steps.compile.outputs.release-tag }}
+          token: ${{ secrets.GITHUB_TOKEN }}
+          artifacts: "release/*"
