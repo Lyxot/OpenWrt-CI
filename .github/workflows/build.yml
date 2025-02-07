@@ -67,15 +67,11 @@ jobs:
 
       - name: Update feeds
         run: |
-          ./scripts/feeds update -a
-          # 添加 EasyTier
-          git clone $GITHUB_SERVER_URL/EasyTier/luci-app-easytier.git --depth=1
-          cp -r luci-app-easytier/luci-app-easytier feeds/luci/applications
-          rm -rf luci-app-easytier
+          sed -i '$a src-git smpackage https://github.com/kenzok8/small-package' feeds.conf.default
           ./scripts/feeds update -a
           ./scripts/feeds install -a
           
-      - name: Generate configuration file
+      - name: Download configuration file
         run: |
           wget $GITHUB_SERVER_URL/$GITHUB_REPOSITORY/raw/refs/heads/main/.config
           make defconfig
@@ -88,7 +84,7 @@ jobs:
         id: compile
         if: steps.check-update.outputs.update != 'false' || github.event_name == 'workflow_dispatch'
         run: |
-          make V=s -j$(nproc) || make V=s -j$(nproc) || make V=s -j1
+          make -j$(nproc) || make -j$(nproc) || make V=s -j1
           echo compile-status=success >> $GITHUB_OUTPUT
           echo release-tag=$(cat bin/targets/x86/64/version.buildinfo) >> $GITHUB_OUTPUT
           echo "**Full Changelog**: $GITHUB_SERVER_URL/coolsnowwolf/lede/compare/$(cat commit_id)...$(git rev-parse HEAD)" > changelog.md

@@ -16,12 +16,13 @@
   | Easytier | 文件传输 | Passwall2 |
   | 策略路由 | 定时唤醒 | 网络唤醒 |
   | TTYD | Turbo ACC | UPNP | 
+  | wireguard | iperf3 | argon 配置 |
 - 其它：
   | | | |
   | ------------ | ------------ | ------------ |
   | apk 包管理器 | btrfs 文件系统 | firewall4 防火墙 |
   | IPv6 | 透明网桥 | 移除 autosamba |
-  | 移除 KMS 服务器 | r8125/r8126 RSS 驱动 | 端口聚合 |
+  | 移除 KMS 服务器 | r8125/r8126 RSS 驱动 | 链路聚合 |
   | shortcut-fe 快速转发 | wireguard | iperf/iperf3 |
   | ppp-multilink | tcping | unzip |
   | xz | bash | qemu-ga | 
