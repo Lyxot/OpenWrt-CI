@@ -20,8 +20,8 @@
   | | | |
   | ------------ | ------------ | ------------ |
   | apk 包管理器 | btrfs 文件系统 | firewall4 防火墙 |
-  | IPv6 支持 | 透明网桥支持 | 移除 autosamba |
-  | 移除 KMS 服务器 | r8125 RSS 驱动 | r8126 RSS 驱动 |
-  | shortcut-fe 快速转发 | iperf | iperf3 |
+  | IPv6 | 透明网桥 | 移除 autosamba |
+  | 移除 KMS 服务器 | r8125/r8126 RSS 驱动 | 端口聚合 |
+  | shortcut-fe 快速转发 | wireguard | iperf/iperf3 |
   | ppp-multilink | tcping | unzip |
   | xz | bash | qemu-ga | 
