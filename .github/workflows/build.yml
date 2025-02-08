@@ -9,7 +9,7 @@ on:
         type: boolean
         default: false
   schedule:
-    - cron: '0 20 */3 * *'
+    - cron: '0 20 * * 1'
 
 jobs:
   build_openwrt:
@@ -27,7 +27,7 @@ jobs:
       - name: Checkout OpenWrt
         uses: actions/checkout@v4
         with:
-          repository: coolsnowwolf/lede
+          repository: immortalwrt/immortalwrt
 
       - name: Restore cache
         uses: actions/cache/restore@v4
@@ -38,7 +38,7 @@ jobs:
             ./build_dir
             ./commit_id
             ./dl
-          key: lede-ccache
+          key: immortalwrt-ccache
 
       - name: Check update
         id: check-update
@@ -56,10 +56,9 @@ jobs:
           DEBIAN_FRONTEND: noninteractive
         id: init-env
         run: |
-          sudo -E apt update
-          sudo -E apt -y install ack antlr3 asciidoc autoconf automake autopoint binutils bison build-essential bzip2 ccache clang cmake cpio curl device-tree-compiler flex gawk gcc-multilib g++-multilib gettext genisoimage git gperf haveged help2man intltool libc6-dev-i386 libelf-dev libfuse-dev libglib2.0-dev libgmp3-dev libltdl-dev libmpc-dev libmpfr-dev libncurses5-dev libncursesw5-dev libpython3-dev libreadline-dev libssl-dev libtool llvm lrzsz msmtp ninja-build p7zip p7zip-full patch pkgconf python3 python3-pyelftools python3-setuptools qemu-utils rsync scons squashfs-tools subversion swig texinfo uglifyjs upx-ucl unzip vim wget xmlto xxd zlib1g-dev
+          sudo bash -c 'bash <(curl -s https://build-scripts.immortalwrt.org/init_build_environment.sh)'
           sudo -E timedatectl set-timezone "Asia/Shanghai"
-          echo cache-key=lede-ccache-$(git rev-parse HEAD) >> $GITHUB_OUTPUT
+          echo cache-key=immortalwrt-ccache-$(git rev-parse HEAD) >> $GITHUB_OUTPUT
 
       - name: Setup Debug Session
         if: github.event.inputs.enable_debug == 'true'
@@ -67,15 +66,12 @@ jobs:
 
       - name: Update feeds
         run: |
+          sed -i '$a src-git smpackage https://github.com/kenzok8/small-package' feeds.conf.default
           ./scripts/feeds update -a
-          # 添加 EasyTier
-          git clone $GITHUB_SERVER_URL/EasyTier/luci-app-easytier.git --depth=1
-          cp -r luci-app-easytier/luci-app-easytier feeds/luci/applications
-          rm -rf luci-app-easytier
-          ./scripts/feeds update -a
+          rm -rf feeds/smpackage/{base-files,dnsmasq,firewall*,fullconenat,libnftnl,nftables,ppp,opkg,ucl,upx,vsftpd*,miniupnpd-iptables,wireless-regdb}
           ./scripts/feeds install -a
           
-      - name: Generate configuration file
+      - name: Download configuration file
         run: |
           wget $GITHUB_SERVER_URL/$GITHUB_REPOSITORY/raw/refs/heads/main/.config
           make defconfig
@@ -88,10 +84,11 @@ jobs:
         id: compile
         if: steps.check-update.outputs.update != 'false' || github.event_name == 'workflow_dispatch'
         run: |
-          make V=s -j$(nproc) || make V=s -j$(nproc) || make V=s -j1
+          alias mkdir='mkdir -p'
+          make -j$(nproc) || make -j$(nproc) || make V=s -j1
           echo compile-status=success >> $GITHUB_OUTPUT
           echo release-tag=$(cat bin/targets/x86/64/version.buildinfo) >> $GITHUB_OUTPUT
-          echo "**Full Changelog**: $GITHUB_SERVER_URL/coolsnowwolf/lede/compare/$(cat commit_id)...$(git rev-parse HEAD)" > changelog.md
+          echo "**Full Changelog**: https://github.com/immortalwrt/immortalwrt/compare/$(cat commit_id)...$(git rev-parse HEAD)" > changelog.md
       
       - name: Clean up
         if: steps.compile.outputs.compile-status == 'success'
