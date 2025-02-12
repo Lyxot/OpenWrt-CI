@@ -9,12 +9,12 @@ on:
         type: boolean
         default: false
   schedule:
-    - cron: '0 20 */3 * *'
+    - cron: '0 20 * * 0,4'
 
 jobs:
   build_openwrt:
     name: Build OpenWrt Firmware
-    runs-on: ubuntu-22.04
+    runs-on: ubuntu-24.04
     steps:
       - name: Set Swap Space
         uses: pierotofy/set-swap-space@master
@@ -27,39 +27,31 @@ jobs:
       - name: Checkout OpenWrt
         uses: actions/checkout@v4
         with:
-          repository: coolsnowwolf/lede
+          repository: immortalwrt/immortalwrt
 
       - name: Restore cache
         uses: actions/cache/restore@v4
         with:
           path: |
             ./.ccache
-            ./staging_dir
-            ./build_dir
-            ./commit_id
             ./dl
-          key: lede-ccache
-
-      - name: Check update
-        id: check-update
-        run: |
-          export current_id=$(cat commit_id)
-          export latest_id=$(git rev-parse HEAD)
-          if [ "$current_id" != "$latest_id" ]; then
-            echo update=true >> $GITHUB_OUTPUT
-          else
-            echo update=false >> $GITHUB_OUTPUT
-          fi
+          key: immortalwrt-ccache
 
       - name: Initialization environment
         env:
           DEBIAN_FRONTEND: noninteractive
-        id: init-env
         run: |
-          sudo -E apt update
-          sudo -E apt -y install ack antlr3 asciidoc autoconf automake autopoint binutils bison build-essential bzip2 ccache clang cmake cpio curl device-tree-compiler flex gawk gcc-multilib g++-multilib gettext genisoimage git gperf haveged help2man intltool libc6-dev-i386 libelf-dev libfuse-dev libglib2.0-dev libgmp3-dev libltdl-dev libmpc-dev libmpfr-dev libncurses5-dev libncursesw5-dev libpython3-dev libreadline-dev libssl-dev libtool llvm lrzsz msmtp ninja-build p7zip p7zip-full patch pkgconf python3 python3-pyelftools python3-setuptools qemu-utils rsync scons squashfs-tools subversion swig texinfo uglifyjs upx-ucl unzip vim wget xmlto xxd zlib1g-dev
+          sudo bash -c 'bash <(curl -s https://build-scripts.immortalwrt.org/init_build_environment.sh)'
           sudo -E timedatectl set-timezone "Asia/Shanghai"
-          echo cache-key=lede-ccache-$(git rev-parse HEAD) >> $GITHUB_OUTPUT
+          df -h
+
+      - name: Patch
+        run: |
+          wget https://github.com/$GITHUB_REPOSITORY/raw/refs/heads/main/setmirrors.py
+          python3 setmirrors.py
+          if ! grep -q "CONFIG_X86_SGX" target/linux/x86/64/config-6.6; then
+            echo "# CONFIG_X86_SGX is not set" >> target/linux/x86/64/config-6.6
+          fi
 
       - name: Setup Debug Session
         if: github.event.inputs.enable_debug == 'true'
@@ -67,114 +59,96 @@ jobs:
 
       - name: Update feeds
         run: |
+          sed -i '$a src-git smpackage https://github.com/kenzok8/small-package' feeds.conf.default
           ./scripts/feeds update -a
-          # 添加 EasyTier
-          git clone $GITHUB_SERVER_URL/EasyTier/luci-app-easytier.git --depth=1
-          cp -r luci-app-easytier/luci-app-easytier feeds/luci/applications
-          rm -rf luci-app-easytier
-          ./scripts/feeds update -a
+          rm -rf feeds/smpackage/{base-files,dnsmasq,firewall*,fullconenat,libnftnl,nftables,ppp,opkg,ucl,upx,vsftpd*,miniupnpd-iptables,wireless-regdb}
           ./scripts/feeds install -a
           
-      - name: Generate configuration file
+      - name: Download configuration file
         run: |
-          wget $GITHUB_SERVER_URL/$GITHUB_REPOSITORY/raw/refs/heads/main/.config
+          wget https://github.com/$GITHUB_REPOSITORY/raw/refs/heads/main/.config
+          cp .config .config.raw
           make defconfig
+          diff .config .config.raw || :
 
       - name: Download packages
+        run: make download V=s -j1
+
+      - name: Build toolchain
         run: |
-          make download V=s -j$(nproc)
+          make V=s -j1 toolchain/binutils/prepare
+          make V=s -j$(nproc) toolchain/binutils/compile || (rm -rf build_dir/toolchain*/gdb* && make download && make V=s -j1 toolchain/binutils/prepare && make V=s -j1 toolchain/binutils/compile)
+          make V=s -j1 toolchain/nasm/prepare
+          make V=s -j$(nproc) toolchain/nasm/compile || (rm -rf build_dir/toolchain*/nasm* && make download && make V=s -j1 toolchain/nasm/prepare && make V=s -j1 toolchain/nasm/compile)
 
       - name: Compile OpenWrt
-        id: compile
-        if: steps.check-update.outputs.update != 'false' || github.event_name == 'workflow_dispatch'
         run: |
+          alias mkdir='mkdir -p'
           make V=s -j$(nproc) || make V=s -j$(nproc) || make V=s -j1
-          echo compile-status=success >> $GITHUB_OUTPUT
-          echo release-tag=$(cat bin/targets/x86/64/version.buildinfo) >> $GITHUB_OUTPUT
-          echo "**Full Changelog**: $GITHUB_SERVER_URL/coolsnowwolf/lede/compare/$(cat commit_id)...$(git rev-parse HEAD)" > changelog.md
-      
+          export latest_tag=$(curl -s "https://api.github.com/repos/$GITHUB_REPOSITORY/releases/latest" | grep '"name":' | head -n1 | cut -d'"' -f4)
+          echo "**Full Changelog**: https://github.com/immortalwrt/immortalwrt/compare/$latest_tag...$(git rev-parse --short HEAD)" > changelog.md
+
       - name: Clean up
-        if: steps.compile.outputs.compile-status == 'success'
+        id: clean
         run: |
           rm -rf staging_dir/target*
           rm -rf build_dir/target*
-          echo $(git rev-parse HEAD) > commit_id
+          echo "release_tag=$(git rev-parse --short HEAD)" | tee -a $GITHUB_OUTPUT
+          echo "cache=true" >> $GITHUB_OUTPUT
+          if [ $(du dl .ccache -scm | grep total | awk '{print $1}') -gt 10240 ]; then
+            echo "cache=false" | tee -a $GITHUB_OUTPUT
+          fi
+          du dl .ccache -sch
           ls bin/targets/x86/64
+          df -h
 
       - name: Upload buildinfo
-        if: steps.compile.outputs.compile-status == 'success'
         uses: actions/upload-artifact@v4
         with:
           name: OpenWrt_buildinfo
           path: ./bin/targets/x86/64/*.buildinfo
 
-      - name: Upload ext4 efi images
-        if: steps.compile.outputs.compile-status == 'success'
-        uses: actions/upload-artifact@v4
-        with:
-          name: OpenWrt_ext4_efi_images
-          path: |
-            ./bin/targets/x86/64/openwrt-x86-64-generic-ext4-combined-efi.*
-
-      - name: Upload ext4 images
-        if: steps.compile.outputs.compile-status == 'success'
-        uses: actions/upload-artifact@v4
-        with:
-          name: OpenWrt_ext4_images
-          path: |
-            ./bin/targets/x86/64/openwrt-x86-64-generic-ext4-combined.*
-
-      - name: Upload squashfs efi images
-        if: steps.compile.outputs.compile-status == 'success'
-        uses: actions/upload-artifact@v4
-        with:
-          name: OpenWrt_squashfs_efi_images
-          path: |
-            ./bin/targets/x86/64/openwrt-x86-64-generic-squashfs-combined-efi.*
-
-      - name: Upload squashfs images
-        if: steps.compile.outputs.compile-status == 'success'
-        uses: actions/upload-artifact@v4
-        with:
-          name: OpenWrt_squashfs_images
-          path: |
-            ./bin/targets/x86/64/openwrt-x86-64-generic-squashfs-combined.*
-
-      - name: Upload rootfs
-        if: steps.compile.outputs.compile-status == 'success'
-        uses: actions/upload-artifact@v4
-        with:
-          name: OpenWrt_rootfs
-          path: ./bin/targets/x86/64/openwrt-x86-64-generic-rootfs.tar.gz
-
       - name: Save cache
-        if: steps.compile.outputs.compile-status == 'success'
+        if: steps.clean.outputs.cache == 'true'
         uses: actions/cache/save@v4
         with:
           path: |
             ./.ccache
-            ./staging_dir
-            ./build_dir
-            ./commit_id
             ./dl
-          key: ${{ steps.init-env.outputs.cache-key }}
+          key: immortalwrt-ccache-${{ hashFiles('./bin/targets/x86/64/immortalwrt-x86-64-generic-rootfs.tar.gz') }}
+
+      - name: Upload ext4 images
+        uses: actions/upload-artifact@v4
+        with:
+          name: OpenWrt_ext4_images
+          path: |
+            ./bin/targets/x86/64/immortalwrt-x86-64-generic-ext4-combined-efi.*
+
+      - name: Upload squashfs images
+        uses: actions/upload-artifact@v4
+        with:
+          name: OpenWrt_squashfs_images
+          path: |
+            ./bin/targets/x86/64/immortalwrt-x86-64-generic-squashfs-combined-efi.*
+
+      - name: Upload rootfs
+        uses: actions/upload-artifact@v4
+        with:
+          name: OpenWrt_rootfs
+          path: ./bin/targets/x86/64/immortalwrt-x86-64-generic-rootfs.tar.gz
 
       - name: Prepare release
-        if: steps.compile.outputs.compile-status == 'success'
         run: |
           mkdir -p release
-          mv ./bin/targets/x86/64/openwrt-x86-64-generic-ext4-combined-efi.* release/
-          mv ./bin/targets/x86/64/openwrt-x86-64-generic-ext4-combined.* release/
-          mv ./bin/targets/x86/64/openwrt-x86-64-generic-squashfs-combined-efi.* release/
-          mv ./bin/targets/x86/64/openwrt-x86-64-generic-squashfs-combined.* release/
-          mv ./bin/targets/x86/64/openwrt-x86-64-generic-rootfs.tar.gz release/
+          mv ./bin/targets/x86/64/immortalwrt-x86-64-generic-ext4-combined-efi.* release/
+          mv ./bin/targets/x86/64/immortalwrt-x86-64-generic-squashfs-combined-efi.* release/
+          mv ./bin/targets/x86/64/immortalwrt-x86-64-generic-rootfs.tar.gz release/
 
       - name: Release
-        if: steps.compile.outputs.compile-status == 'success'
         uses: ncipollo/release-action@v1
         with:
           allowUpdates: true
           bodyFile: "changelog.md"
-          tag: ${{ steps.compile.outputs.release-tag }}
+          tag: ${{ steps.clean.outputs.release_tag }}
           token: ${{ secrets.GITHUB_TOKEN }}
           artifacts: "release/*"
