@@ -12,9 +12,26 @@ on:
     - cron: '0 20 * * 0,4'
 
 jobs:
+  check_update:
+    name: Check Update
+    runs-on: ubuntu-latest
+    outputs:
+      tag: ${{ steps.check_update.outputs.tag }}
+      commit: ${{ steps.check_update.outputs.commit }}
+    steps:
+      - name: Check
+        id: check_update
+        run: |
+          export tag=$(curl -s "https://api.github.com/repos/$GITHUB_REPOSITORY/releases/latest" | jq -r '.name')
+          export commit=$(curl -s 'https://api.github.com/repos/immortalwrt/immortalwrt/commits/master' | jq -r '.sha' | cut -c1-7)
+          echo "tag=$tag" | tee -a $GITHUB_OUTPUT
+          echo "commit=$commit" | tee -a $GITHUB_OUTPUT
+
   build_openwrt:
     name: Build OpenWrt Firmware
     runs-on: ubuntu-24.04
+    needs: check_update
+    if: needs.check_update.outputs.tag != needs.check_update.outputs.commit
     steps:
       - name: Set Swap Space
         uses: pierotofy/set-swap-space@master
@@ -85,15 +102,17 @@ jobs:
         run: |
           alias mkdir='mkdir -p'
           make V=s -j$(nproc) || make V=s -j$(nproc) || make V=s -j1
-          export latest_tag=$(curl -s "https://api.github.com/repos/$GITHUB_REPOSITORY/releases/latest" | grep '"name":' | head -n1 | cut -d'"' -f4)
-          echo "**Full Changelog**: https://github.com/immortalwrt/immortalwrt/compare/$latest_tag...$(git rev-parse --short HEAD)" > changelog.md
+          export latest_tag=$(curl -s "https://api.github.com/repos/$GITHUB_REPOSITORY/releases/latest" | jq -r '.name')
+          echo "**Update Time**: $(TZ=Asia/Shanghai date -Iseconds)" > changelog.md
+          echo "**Full Changelog**: https://github.com/immortalwrt/immortalwrt/compare/$latest_tag...$(git rev-parse --short HEAD)" >> changelog.md
 
       - name: Clean up
         id: clean
         run: |
           rm -rf staging_dir/target*
           rm -rf build_dir/target*
-          echo "release_tag=$(git rev-parse --short HEAD)" | tee -a $GITHUB_OUTPUT
+          echo "release_name=$(git rev-parse --short HEAD)" | tee -a $GITHUB_OUTPUT
+          echo "release_tag=$(curl -s 'https://api.github.com/repos/immortalwrt/immortalwrt/tags' | jq -r '.[0].name')" | tee -a $GITHUB_OUTPUT
           echo "cache=true" >> $GITHUB_OUTPUT
           if [ $(du dl .ccache -scm | grep total | awk '{print $1}') -gt 10240 ]; then
             echo "cache=false" | tee -a $GITHUB_OUTPUT
@@ -149,6 +168,9 @@ jobs:
         with:
           allowUpdates: true
           bodyFile: "changelog.md"
+          name: ${{ steps.clean.outputs.release_name }}
           tag: ${{ steps.clean.outputs.release_tag }}
+          makeLatest: true
+          replacesArtifacts: true
           token: ${{ secrets.GITHUB_TOKEN }}
           artifacts: "release/*"
