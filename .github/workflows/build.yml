@@ -16,22 +16,25 @@ jobs:
     name: Check Update
     runs-on: ubuntu-latest
     outputs:
-      tag: ${{ steps.check_update.outputs.tag }}
-      commit: ${{ steps.check_update.outputs.commit }}
+      current: ${{ steps.check_update.outputs.current }}
+      latest: ${{ steps.check_update.outputs.latest }}
+      release_tag: ${{ steps.check_update.outputs.release_tag }}
     steps:
       - name: Check
         id: check_update
         run: |
-          export tag=$(curl -s "https://api.github.com/repos/$GITHUB_REPOSITORY/releases/latest" | jq -r '.name')
-          export commit=$(curl -s 'https://api.github.com/repos/immortalwrt/immortalwrt/commits/master' | jq -r '.sha' | cut -c1-7)
-          echo "tag=$tag" | tee -a $GITHUB_OUTPUT
-          echo "commit=$commit" | tee -a $GITHUB_OUTPUT
+          export current=$(curl -s "https://api.github.com/repos/$GITHUB_REPOSITORY/releases/latest" | jq -r '.body' | sed -n '2{s/.*\.\.\.//;p}' | tr -d '\r\n')
+          echo "current=$current" | tee -a $GITHUB_OUTPUT
+          echo "latest=$(curl -s 'https://api.github.com/repos/immortalwrt/immortalwrt/commits/master' | jq -r '.sha' | cut -c1-7)" | tee -a $GITHUB_OUTPUT
+          echo "release_tag=$(curl -s 'https://api.github.com/repos/immortalwrt/immortalwrt/tags' | jq -r '.[0].name')" | tee -a $GITHUB_OUTPUT
 
   build_openwrt:
     name: Build OpenWrt Firmware
     runs-on: ubuntu-24.04
     needs: check_update
-    if: needs.check_update.outputs.tag != needs.check_update.outputs.commit
+    if: needs.check_update.outputs.current != needs.check_update.outputs.latest
+    env:
+      TZ: Asia/Shanghai
     steps:
       - name: Set Swap Space
         uses: pierotofy/set-swap-space@master
@@ -60,15 +63,9 @@ jobs:
         run: |
           sudo bash -c 'bash <(curl -s https://build-scripts.immortalwrt.org/init_build_environment.sh)'
           sudo -E timedatectl set-timezone "Asia/Shanghai"
-          df -h
-
-      - name: Patch
-        run: |
           wget https://github.com/$GITHUB_REPOSITORY/raw/refs/heads/main/setmirrors.py
           python3 setmirrors.py
-          if ! grep -q "CONFIG_X86_SGX" target/linux/x86/64/config-6.6; then
-            echo "# CONFIG_X86_SGX is not set" >> target/linux/x86/64/config-6.6
-          fi
+          df -h
 
       - name: Setup Debug Session
         if: github.event.inputs.enable_debug == 'true'
@@ -84,17 +81,40 @@ jobs:
       - name: Download configuration file
         run: |
           wget https://github.com/$GITHUB_REPOSITORY/raw/refs/heads/main/.config
+          export version=$(echo ${{ needs.check_update.outputs.release_tag }} | sed 's/v//')
           cp .config .config.raw
+          echo "CONFIG_VERSION_NUMBER=\"$version\"" >> .config
+          echo "CONFIG_VERSION_REPO=\"https://github.com/$GITHUB_REPOSITORY/releases\"" >> .config
           make defconfig
-          diff .config .config.raw || :
+          diff .config .config.raw | tee .config.diff || :
+          export diff_count=$(grep -c "^[<>]" .config.diff)
+          echo "diff_count=$diff_count"
+          if [[ $diff_count -gt 60 ]]; then
+            echo "Too many changes! Please check the configuration file."
+            exit 1
+          fi
 
       - name: Download packages
         run: make download V=s -j1
 
+      - name: Patch
+        run: |
+          if ! grep -q "CONFIG_X86_SGX" target/linux/x86/64/config-6.6; then
+            echo "# CONFIG_X86_SGX is not set" >> target/linux/x86/64/config-6.6
+          fi
+          export param=$(cat package/base-files/files/usr/lib/os-release | grep BUILD_DATE | sed 's/.*=//')
+          echo "BUILD_DATE=$param" >> package/base-files/files/usr/lib/os-release
+          cat > feeds/smpackage/luci-app-ota/root/etc/config/ota <<EOF
+
+          config ota 'config'
+                  option api_url 'https://github.com/$GITHUB_REPOSITORY/releases/latest/download/fw.json'
+          EOF
+          sed -i 's/curl /curl -L /g' feeds/smpackage/luci-app-ota/root/bin/ota
+
       - name: Build toolchain
         run: |
           make V=s -j1 toolchain/binutils/prepare
-          make V=s -j$(nproc) toolchain/binutils/compile || (rm -rf build_dir/toolchain*/gdb* && make download && make V=s -j1 toolchain/binutils/prepare && make V=s -j1 toolchain/binutils/compile)
+          make V=s -j$(nproc) toolchain/binutils/compile || (rm -rf build_dir/toolchain*/binutils* && make download && make V=s -j1 toolchain/binutils/prepare && make V=s -j1 toolchain/binutils/compile)
           make V=s -j1 toolchain/nasm/prepare
           make V=s -j$(nproc) toolchain/nasm/compile || (rm -rf build_dir/toolchain*/nasm* && make download && make V=s -j1 toolchain/nasm/prepare && make V=s -j1 toolchain/nasm/compile)
 
@@ -102,17 +122,12 @@ jobs:
         run: |
           alias mkdir='mkdir -p'
           make V=s -j$(nproc) || make V=s -j$(nproc) || make V=s -j1
-          export latest_tag=$(curl -s "https://api.github.com/repos/$GITHUB_REPOSITORY/releases/latest" | jq -r '.name')
-          echo "**Update Time**: $(TZ=Asia/Shanghai date -Iseconds)" > changelog.md
-          echo "**Full Changelog**: https://github.com/immortalwrt/immortalwrt/compare/$latest_tag...$(git rev-parse --short HEAD)" >> changelog.md
 
       - name: Clean up
         id: clean
         run: |
           rm -rf staging_dir/target*
           rm -rf build_dir/target*
-          echo "release_name=$(git rev-parse --short HEAD)" | tee -a $GITHUB_OUTPUT
-          echo "release_tag=$(curl -s 'https://api.github.com/repos/immortalwrt/immortalwrt/tags' | jq -r '.[0].name')" | tee -a $GITHUB_OUTPUT
           echo "cache=true" >> $GITHUB_OUTPUT
           if [ $(du dl .ccache -scm | grep total | awk '{print $1}') -gt 10240 ]; then
             echo "cache=false" | tee -a $GITHUB_OUTPUT
@@ -159,6 +174,21 @@ jobs:
       - name: Prepare release
         run: |
           mkdir -p release
+          cat > release/fw.json <<EOF
+          {
+            "x86_64": [
+              {
+                "build_date": "$(./scripts/get_source_date_epoch.sh)",
+                "sha256sum": "$(sha256sum bin/targets/x86/64/immortalwrt-x86-64-generic-squashfs-combined-efi.img.gz | awk '{print $1}')",
+                "url": "https://github.com/$GITHUB_REPOSITORY/releases/download/${{ needs.check_update.outputs.release_tag }}/immortalwrt-x86-64-generic-squashfs-combined-efi.img.gz"
+              }
+            ]
+          }
+          EOF
+          cat release/fw.json
+          echo "**Update Time**: $(date -d @$(./scripts/get_source_date_epoch.sh) -Iseconds)" > changelog.md
+          echo "**Full Changelog**: https://github.com/immortalwrt/immortalwrt/compare/${{ needs.check_update.outputs.current }}...$(git rev-parse --short HEAD)" >> changelog.md
+          cat changelog.md
           mv ./bin/targets/x86/64/immortalwrt-x86-64-generic-ext4-combined-efi.* release/
           mv ./bin/targets/x86/64/immortalwrt-x86-64-generic-squashfs-combined-efi.* release/
           mv ./bin/targets/x86/64/immortalwrt-x86-64-generic-rootfs.tar.gz release/
@@ -168,8 +198,8 @@ jobs:
         with:
           allowUpdates: true
           bodyFile: "changelog.md"
-          name: ${{ steps.clean.outputs.release_name }}
-          tag: ${{ steps.clean.outputs.release_tag }}
+          removeArtifacts: true
+          tag: ${{ needs.check_update.outputs.release_tag }}
           makeLatest: true
           replacesArtifacts: true
           token: ${{ secrets.GITHUB_TOKEN }}

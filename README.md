@@ -1,7 +1,8 @@
 适用于 x86_64 的 OpenWrt 固件，基于 [ImmortalWrt](https://github.com/immortalwrt/immortalwrt) 构建
 
 ## 固件下载
-[Releases](https://github.com/Lyxot/OpenWrt-CI/releases/latest)
+<a href="https://github.com/Lyxot/OpenWrt-CI/releases"><img src="https://img.shields.io/github/release/Lyxot/OpenWrt-CI"/>  <img src="https://img.shields.io/github/downloads/Lyxot/OpenWrt-CI/total"/></a>
+
 每周一、周五自动更新
 
 ## 固件信息
@@ -22,6 +23,7 @@
   | iPerf3 服务器 | Daed | WireGuard |
 - 其它:
   - apk 包管理器
+  - OTA 更新
   - firewall4 防火墙
   - 链路聚合
   - eBPF
