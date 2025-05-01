@@ -22,7 +22,6 @@
   | 终端 | 策略路由 | UPNP |
   | iPerf3 服务器 | Daed | WireGuard |
 - 其它:
-  - apk 包管理器
   - OTA 更新
   - firewall4 防火墙
   - 链路聚合

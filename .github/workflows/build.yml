@@ -49,14 +49,6 @@ jobs:
         with:
           repository: immortalwrt/immortalwrt
 
-      - name: Restore cache
-        uses: actions/cache/restore@v4
-        with:
-          path: |
-            ./.ccache
-            ./dl
-          key: immortalwrt-ccache
-
       - name: Initialization environment
         env:
           DEBIAN_FRONTEND: noninteractive
@@ -110,29 +102,16 @@ jobs:
                   option api_url 'https://github.com/$GITHUB_REPOSITORY/releases/latest/download/fw.json'
           EOF
           sed -i 's/curl /curl -L /g' feeds/smpackage/luci-app-ota/root/bin/ota
-
-      - name: Build toolchain
-        run: |
-          make V=s -j1 toolchain/binutils/prepare
-          make V=s -j$(nproc) toolchain/binutils/compile || (rm -rf build_dir/toolchain*/binutils* && make download && make V=s -j1 toolchain/binutils/prepare && make V=s -j1 toolchain/binutils/compile)
-          make V=s -j1 toolchain/nasm/prepare
-          make V=s -j$(nproc) toolchain/nasm/compile || (rm -rf build_dir/toolchain*/nasm* && make download && make V=s -j1 toolchain/nasm/prepare && make V=s -j1 toolchain/nasm/compile)
-
+          
       - name: Compile OpenWrt
         run: |
           alias mkdir='mkdir -p'
-          make V=s -j$(nproc) || make V=s -j$(nproc) || make V=s -j1
+          make V=s -j1 || make V=s -j1 || make V=s -j1
 
       - name: Clean up
         id: clean
         run: |
-          rm -rf staging_dir/target*
-          rm -rf build_dir/target*
-          echo "cache=true" >> $GITHUB_OUTPUT
-          if [ $(du dl .ccache -scm | grep total | awk '{print $1}') -gt 10240 ]; then
-            echo "cache=false" | tee -a $GITHUB_OUTPUT
-          fi
-          du dl .ccache -sch
+          rm -rf staging_dir build_dir .ccache dl
           ls bin/targets/x86/64
           df -h
 
@@ -141,15 +120,6 @@ jobs:
         with:
           name: OpenWrt_buildinfo
           path: ./bin/targets/x86/64/*.buildinfo
-
-      - name: Save cache
-        if: steps.clean.outputs.cache == 'true'
-        uses: actions/cache/save@v4
-        with:
-          path: |
-            ./.ccache
-            ./dl
-          key: immortalwrt-ccache-${{ hashFiles('./bin/targets/x86/64/immortalwrt-x86-64-generic-rootfs.tar.gz') }}
 
       - name: Upload ext4 images
         uses: actions/upload-artifact@v4
