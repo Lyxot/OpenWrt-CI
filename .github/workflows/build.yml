@@ -8,6 +8,11 @@ on:
         required: false
         type: boolean
         default: false
+      build:
+        description: 'Build Firmware'
+        required: false
+        type: boolean
+        default: false
   schedule:
     - cron: '0 20 * * 0,4'
 
@@ -32,7 +37,7 @@ jobs:
     name: Build OpenWrt Firmware
     runs-on: ubuntu-24.04
     needs: check_update
-    if: needs.check_update.outputs.current != needs.check_update.outputs.latest
+    if: needs.check_update.outputs.current != needs.check_update.outputs.latest || github.event.inputs.build == 'true'
     env:
       TZ: Asia/Shanghai
     steps:
@@ -48,6 +53,13 @@ jobs:
         uses: actions/checkout@v4
         with:
           repository: immortalwrt/immortalwrt
+
+      - name: Restore cache
+        uses: actions/cache/restore@v4
+        with:
+          path: |
+            ./.ccache
+          key: immortalwrt-ccache
 
       - name: Initialization environment
         env:
@@ -102,16 +114,35 @@ jobs:
                   option api_url 'https://github.com/$GITHUB_REPOSITORY/releases/latest/download/fw.json'
           EOF
           sed -i 's/curl /curl -L /g' feeds/smpackage/luci-app-ota/root/bin/ota
-          
+
       - name: Compile OpenWrt
+        id: compile1
         run: |
           alias mkdir='mkdir -p'
-          make V=s -j1 || make V=s -j1 || make V=s -j1
+          make -j$(nproc) || echo "result=fail" >> $GITHUB_OUTPUT
+
+      - name: Retry #2
+        id: compile2
+        if: steps.compile1.outputs.result == 'fail'
+        run: |
+          make V=s -j1 || echo "result=fail" >> $GITHUB_OUTPUT
+
+      - name: Retry #3
+        if: steps.compile2.outputs.result == 'fail'
+        run: |
+          make V=s -j1
 
       - name: Clean up
         id: clean
         run: |
-          rm -rf staging_dir build_dir .ccache dl
+          rm -rf staging_dir/target*
+          rm -rf build_dir/target*
+          rm -rf dl
+          echo "cache=true" >> $GITHUB_OUTPUT
+          if [ $(du .ccache -scm | grep total | awk '{print $1}') -gt 10240 ]; then
+            echo "cache=false" | tee -a $GITHUB_OUTPUT
+          fi
+          du .ccache -sch
           ls bin/targets/x86/64
           df -h
 
@@ -120,6 +151,14 @@ jobs:
         with:
           name: OpenWrt_buildinfo
           path: ./bin/targets/x86/64/*.buildinfo
+
+      - name: Save cache
+        if: steps.clean.outputs.cache == 'true'
+        uses: actions/cache/save@v4
+        with:
+          path: |
+            ./.ccache
+          key: immortalwrt-ccache-${{ hashFiles('./bin/targets/x86/64/immortalwrt-x86-64-generic-rootfs.tar.gz') }}
 
       - name: Upload ext4 images
         uses: actions/upload-artifact@v4
@@ -165,6 +204,7 @@ jobs:
 
       - name: Release
         uses: ncipollo/release-action@v1
+        if: github.event.inputs.build != 'true'
         with:
           allowUpdates: true
           bodyFile: "changelog.md"
