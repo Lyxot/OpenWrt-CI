@@ -107,8 +107,8 @@ jobs:
 
       - name: Patch
         run: |
-          if ! grep -q "CONFIG_X86_SGX" target/linux/x86/64/config-6.6; then
-            echo "# CONFIG_X86_SGX is not set" >> target/linux/x86/64/config-6.6
+          if ! grep -q "CONFIG_X86_SGX" target/linux/x86/64/config-6.12; then
+            echo "# CONFIG_X86_SGX is not set" >> target/linux/x86/64/config-6.12
           fi
           export param=$(cat package/base-files/files/usr/lib/os-release | grep BUILD_DATE | sed 's/.*=//')
           echo "BUILD_DATE=$param" >> package/base-files/files/usr/lib/os-release
