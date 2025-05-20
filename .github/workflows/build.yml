@@ -41,35 +41,36 @@ jobs:
     env:
       TZ: Asia/Shanghai
     steps:
-      - name: Set Swap Space
-        uses: pierotofy/set-swap-space@master
-        with:
-          swap-size-gb: 64
-
-      - name: Set tmpfs
-        run: sudo mount -t tmpfs -o size=64G tmpfs .
-
-      - name: Checkout OpenWrt
-        uses: actions/checkout@v4
-        with:
-          repository: immortalwrt/immortalwrt
-
-      - name: Restore cache
-        uses: actions/cache/restore@v4
-        with:
-          path: |
-            ./.ccache
-          key: immortalwrt-ccache
-
       - name: Initialization environment
         env:
           DEBIAN_FRONTEND: noninteractive
         run: |
           sudo bash -c 'bash <(curl -s https://build-scripts.immortalwrt.org/init_build_environment.sh)'
           sudo -E timedatectl set-timezone "Asia/Shanghai"
-          wget https://github.com/$GITHUB_REPOSITORY/raw/refs/heads/main/setmirrors.py
-          python3 setmirrors.py
-          df -h
+          sudo -E apt-get -y autoremove --purge
+          sudo -E apt-get -y clean
+
+      - name: Maximize build space
+        uses: easimon/maximize-build-space@master
+        with:
+          root-reserve-mb: 8192
+          remove-dotnet: true
+          remove-android: true
+          remove-haskell: true
+          remove-codeql: true
+          remove-docker-images: true
+
+      - name: Checkout OpenWrt
+        uses: actions/checkout@v4
+        with:
+          repository: immortalwrt/immortalwrt
+
+      - name: Cache Toolchain
+        uses: klever1988/cachewrtbuild@main
+        with:
+          ccache: 'true'
+          toolchain: 'true'
+          mixkey: 'x86_64'
 
       - name: Setup Debug Session
         if: github.event.inputs.enable_debug == 'true'
@@ -99,7 +100,10 @@ jobs:
           fi
 
       - name: Download packages
-        run: make download V=s -j1
+        run: |
+          wget https://github.com/$GITHUB_REPOSITORY/raw/refs/heads/main/setmirrors.py
+          python3 setmirrors.py
+          make download V=s -j1
 
       - name: Patch
         run: |
@@ -121,28 +125,19 @@ jobs:
           alias mkdir='mkdir -p'
           make -j$(nproc) || echo "result=fail" >> $GITHUB_OUTPUT
 
-      - name: Retry #2
+      - name: Compile OpenWrt(2)
         id: compile2
         if: steps.compile1.outputs.result == 'fail'
         run: |
           make V=s -j1 || echo "result=fail" >> $GITHUB_OUTPUT
 
-      - name: Retry #3
+      - name: Compile OpenWrt(3)
         if: steps.compile2.outputs.result == 'fail'
         run: |
           make V=s -j1
 
       - name: Clean up
-        id: clean
         run: |
-          rm -rf staging_dir/target*
-          rm -rf build_dir/target*
-          rm -rf dl
-          echo "cache=true" >> $GITHUB_OUTPUT
-          if [ $(du .ccache -scm | grep total | awk '{print $1}') -gt 10240 ]; then
-            echo "cache=false" | tee -a $GITHUB_OUTPUT
-          fi
-          du .ccache -sch
           ls bin/targets/x86/64
           df -h
 
@@ -151,14 +146,6 @@ jobs:
         with:
           name: OpenWrt_buildinfo
           path: ./bin/targets/x86/64/*.buildinfo
-
-      - name: Save cache
-        if: steps.clean.outputs.cache == 'true'
-        uses: actions/cache/save@v4
-        with:
-          path: |
-            ./.ccache
-          key: immortalwrt-ccache-${{ hashFiles('./bin/targets/x86/64/immortalwrt-x86-64-generic-rootfs.tar.gz') }}
 
       - name: Upload ext4 images
         uses: actions/upload-artifact@v4
@@ -204,7 +191,7 @@ jobs:
 
       - name: Release
         uses: ncipollo/release-action@v1
-        if: github.event.inputs.build != 'true'
+        if: github.event.inputs.build != 'true' && github.ref_name == 'main'
         with:
           allowUpdates: true
           bodyFile: "changelog.md"
