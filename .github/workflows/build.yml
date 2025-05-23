@@ -86,12 +86,11 @@ jobs:
       - name: Download configuration file
         uses: actions/checkout@v4
         with:
-          sparse-checkout: |
-            .config
-          sparse-checkout-cone-mode: false
+          path: CI
           
       - name: Configure
         run: |
+          cp CI/.config .
           export version=$(echo ${{ needs.check_update.outputs.release_tag }} | sed 's/v//')
           cp .config .config.raw
           echo "CONFIG_VERSION_NUMBER=\"$version\"" >> .config
