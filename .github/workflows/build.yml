@@ -82,10 +82,16 @@ jobs:
           ./scripts/feeds update -a
           rm -rf feeds/smpackage/{base-files,dnsmasq,firewall*,fullconenat,libnftnl,nftables,ppp,opkg,ucl,upx,vsftpd*,miniupnpd-iptables,wireless-regdb}
           ./scripts/feeds install -a
-          
+
       - name: Download configuration file
+        uses: actions/checkout@v4
+        with:
+          sparse-checkout: |
+            .config
+          sparse-checkout-cone-mode: false
+          
+      - name: Configure
         run: |
-          wget https://github.com/$GITHUB_REPOSITORY/raw/refs/heads/main/.config
           export version=$(echo ${{ needs.check_update.outputs.release_tag }} | sed 's/v//')
           cp .config .config.raw
           echo "CONFIG_VERSION_NUMBER=\"$version\"" >> .config
