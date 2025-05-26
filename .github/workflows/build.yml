@@ -82,10 +82,15 @@ jobs:
           ./scripts/feeds update -a
           rm -rf feeds/smpackage/{base-files,dnsmasq,firewall*,fullconenat,libnftnl,nftables,ppp,opkg,ucl,upx,vsftpd*,miniupnpd-iptables,wireless-regdb}
           ./scripts/feeds install -a
-          
+
       - name: Download configuration file
+        uses: actions/checkout@v4
+        with:
+          path: CI
+          
+      - name: Configure
         run: |
-          wget https://github.com/$GITHUB_REPOSITORY/raw/refs/heads/main/.config
+          cp CI/.config .
           export version=$(echo ${{ needs.check_update.outputs.release_tag }} | sed 's/v//')
           cp .config .config.raw
           echo "CONFIG_VERSION_NUMBER=\"$version\"" >> .config
@@ -107,8 +112,8 @@ jobs:
 
       - name: Patch
         run: |
-          if ! grep -q "CONFIG_X86_SGX" target/linux/x86/64/config-6.6; then
-            echo "# CONFIG_X86_SGX is not set" >> target/linux/x86/64/config-6.6
+          if ! grep -q "CONFIG_X86_SGX" target/linux/x86/64/config-6.12; then
+            echo "# CONFIG_X86_SGX is not set" >> target/linux/x86/64/config-6.12
           fi
           export param=$(cat package/base-files/files/usr/lib/os-release | grep BUILD_DATE | sed 's/.*=//')
           echo "BUILD_DATE=$param" >> package/base-files/files/usr/lib/os-release
