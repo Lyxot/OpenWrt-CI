@@ -8,13 +8,11 @@ on:
         required: false
         type: boolean
         default: false
-      build:
-        description: 'Build Firmware'
-        required: false
-        type: boolean
-        default: false
   schedule:
     - cron: '0 20 * * 0,4'
+  pull_request:
+    branches:
+      - main
 
 jobs:
   check_update:
@@ -37,7 +35,7 @@ jobs:
     name: Build OpenWrt Firmware
     runs-on: ubuntu-24.04
     needs: check_update
-    if: needs.check_update.outputs.current != needs.check_update.outputs.latest || github.event.inputs.build == 'true'
+    if: needs.check_update.outputs.current != needs.check_update.outputs.latest || github.event_name == 'workflow_dispatch' || github.event_name == 'pull_request'
     env:
       TZ: Asia/Shanghai
     steps:
@@ -196,7 +194,7 @@ jobs:
 
       - name: Release
         uses: ncipollo/release-action@v1
-        if: github.event.inputs.build != 'true' && github.ref_name == 'main'
+        if: github.ref_name == 'main' && github.event_name != 'pull_request'
         with:
           allowUpdates: true
           bodyFile: "changelog.md"
