@@ -1,7 +1,6 @@
 name: Update Config
 
 on:
-  push:
   schedule:
     - cron: '0 20 * * 0,4'
 
