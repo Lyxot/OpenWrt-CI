@@ -87,18 +87,13 @@ jobs:
       - name: Configure
         run: |
           cp CI/.config .
+          python3 CI/busybox.py package/utils/busybox/Config-defaults.in
           export version=$(echo ${{ needs.check_update.outputs.release_tag }} | sed 's/v//')
           cp .config .config.raw
           echo "CONFIG_VERSION_NUMBER=\"$version\"" >> .config
           echo "CONFIG_VERSION_REPO=\"https://github.com/$GITHUB_REPOSITORY/releases\"" >> .config
           make defconfig
           diff .config .config.raw | tee .config.diff || :
-          export diff_count=$(grep -c "^[<>]" .config.diff)
-          echo "diff_count=$diff_count"
-          if [[ $diff_count -gt 60 ]]; then
-            echo "Too many changes! Please check the configuration file."
-            exit 1
-          fi
 
       - name: Download packages
         run: |
@@ -202,3 +197,26 @@ jobs:
           replacesArtifacts: true
           token: ${{ secrets.GITHUB_TOKEN }}
           artifacts: "release/*"
+
+      - name: Prepare commit
+        run: |
+          sed -i \
+            -e '/^#\? *CONFIG_BINUTILS_USE_VERSION_/d' \
+            -e '/^#\? *CONFIG_GCC_USE_VERSION_/d' \
+            -e '/^CONFIG_BINUTILS_VERSION/d' \
+            -e '/^CONFIG_GCC_VERSION/d' \
+            -e '/^CONFIG_VERSION_/d' \
+            .config
+          cp .config CI/
+        
+      - name: Create Pull Request
+        uses: peter-evans/create-pull-request@v7
+        with:
+          commit-message: Update .config
+          committer: github-actions[bot] <github-actions[bot]@users.noreply.github.com>
+          author: github-actions[bot] <github-actions[bot]@users.noreply.github.com>
+          title: Update .config
+          body: Update .config
+          path: CI
+          add-paths: .config
+          branch: update-config

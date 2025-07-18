@@ -25,5 +25,7 @@
   - OTA 更新
   - firewall4 防火墙
   - 链路聚合
+  - 更多 busybox 指令
+  - cpupower
   - eBPF
   - qemu-ga
