@@ -3,7 +3,7 @@
 ## 固件下载
 <a href="https://github.com/Lyxot/OpenWrt-CI/releases"><img src="https://img.shields.io/github/release/Lyxot/OpenWrt-CI"/>  <img src="https://img.shields.io/github/downloads/Lyxot/OpenWrt-CI/total"/></a>
 
-每周一、周五自动更新
+每周一自动更新
 
 ## 固件信息
 - 内核版本: Linux 6.12 LTS

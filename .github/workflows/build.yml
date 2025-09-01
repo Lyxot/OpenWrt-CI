@@ -9,8 +9,7 @@ on:
         type: boolean
         default: false
   schedule:
-    - cron: '0 20 * * 0,4'
-  pull_request:
+    - cron: '0 20 * * 0'
 
 jobs:
   check_update:
