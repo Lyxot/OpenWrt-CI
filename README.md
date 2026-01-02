@@ -21,6 +21,7 @@
   | 定时重启 | 定时唤醒 | 网络唤醒 |
   | 终端 | 策略路由 | UPNP |
   | iPerf3 服务器 | Daed | WireGuard |
+  | Ksmbd | UnblockNeteaseMusic | Diskman |
 - 其它:
   - OTA 更新
   - firewall4 防火墙
@@ -29,3 +30,4 @@
   - cpupower
   - eBPF
   - qemu-ga
+  - btrfs/zfs
