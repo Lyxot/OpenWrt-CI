@@ -1,0 +1,119 @@
+name: 'Save Build Cache'
+description: 'Clean old versions, compress and save build artifacts to cache'
+inputs:
+  cache_key:
+    description: 'Cache key prefix'
+    required: true
+  max_size_gb:
+    description: 'Maximum cache size in GB'
+    required: false
+    default: '9'
+outputs:
+  cache_saved:
+    description: 'Whether cache was saved'
+    value: ${{ steps.save.outputs.cache-hit }}
+runs:
+  using: composite
+  steps:
+    - name: Clean old versions and compress
+      id: clean_compress
+      shell: bash
+      run: |
+        # 清理旧版本（除了 .ccache）
+        if [ -d "dl" ]; then
+          python3 CI/remove_old_versions.py dl
+        fi
+        if [ -d "build_dir/host" ]; then
+          python3 CI/remove_old_versions.py build_dir/host
+        fi
+        if [ -d "build_dir" ]; then
+          for dir in build_dir/toolchain*; do
+            if [ -d "$dir" ]; then
+              python3 CI/remove_old_versions.py "$dir"
+            fi
+          done
+        fi
+        if [ -d "staging_dir/host" ]; then
+          python3 CI/remove_old_versions.py staging_dir/host
+        fi
+        if [ -d "staging_dir" ]; then
+          for dir in staging_dir/toolchain*; do
+            if [ -d "$dir" ]; then
+              python3 CI/remove_old_versions.py "$dir"
+            fi
+          done
+        fi
+        if [ -d "build_dir/target-x86_64_musl/linux-x86_64" ]; then
+          for dir in build_dir/target-x86_64_musl/linux-x86_64/linux-[0-9]*; do
+            if [ -d "$dir" ]; then
+              python3 CI/remove_old_versions.py "$dir"
+            fi
+          done
+        fi
+        
+        # 压缩文件夹（使用zstd -T0 9级压缩）
+        mkdir -p cache_artifacts
+        if [ -d ".ccache" ]; then
+          tar --use-compress-program='zstd -T0 -9' -cf cache_artifacts/ccache.tar.zst -C . .ccache
+          echo "Compressed .ccache"
+        fi
+        if [ -d "build_dir/host" ]; then
+          tar --use-compress-program='zstd -T0 -9' -cf cache_artifacts/build_dir_host.tar.zst -C build_dir host
+          echo "Compressed build_dir/host"
+        fi
+        if [ -d "build_dir" ]; then
+          for dir in build_dir/toolchain*; do
+            if [ -d "$dir" ]; then
+              dirname=$(basename "$dir")
+              tar --use-compress-program='zstd -T0 -9' -cf "cache_artifacts/build_dir_${dirname}.tar.zst" -C build_dir "$dirname"
+              echo "Compressed build_dir/$dirname"
+            fi
+          done
+        fi
+        if [ -d "dl" ]; then
+          tar --use-compress-program='zstd -T0 -9' -cf cache_artifacts/dl.tar.zst -C . dl
+          echo "Compressed dl"
+        fi
+        if [ -d "staging_dir/host" ]; then
+          tar --use-compress-program='zstd -T0 -9' -cf cache_artifacts/staging_dir_host.tar.zst -C staging_dir host
+          echo "Compressed staging_dir/host"
+        fi
+        if [ -d "staging_dir" ]; then
+          for dir in staging_dir/toolchain*; do
+            if [ -d "$dir" ]; then
+              dirname=$(basename "$dir")
+              tar --use-compress-program='zstd -T0 -9' -cf "cache_artifacts/staging_dir_${dirname}.tar.zst" -C staging_dir "$dirname"
+              echo "Compressed staging_dir/$dirname"
+            fi
+          done
+        fi
+        if [ -d "build_dir/target-x86_64_musl/linux-x86_64" ]; then
+          for dir in build_dir/target-x86_64_musl/linux-x86_64/linux-[0-9]*; do
+            if [ -d "$dir" ]; then
+              dirname=$(basename "$dir")
+              tar --use-compress-program='zstd -T0 -9' -cf "cache_artifacts/linux_${dirname}.tar.zst" -C build_dir/target-x86_64_musl/linux-x86_64 "$dirname"
+              echo "Compressed build_dir/target-x86_64_musl/linux-x86_64/$dirname"
+            fi
+          done
+        fi
+        
+        # 计算总大小
+        total_size=$(du -sb cache_artifacts | cut -f1)
+        total_size_gb=$((total_size / 1024 / 1024 / 1024))
+        echo "Total cache size: ${total_size_gb}GB"
+        echo "total_size_gb=${total_size_gb}" >> $GITHUB_OUTPUT
+        if [ ${total_size_gb} -le ${{ inputs.max_size_gb }} ]; then
+          echo "cache_available=true" >> $GITHUB_OUTPUT
+        else
+          echo "cache_available=false" >> $GITHUB_OUTPUT
+          echo "Warning: Cache size exceeds ${{ inputs.max_size_gb }}GB, will not cache"
+        fi
+
+    - name: Save cache
+      id: save
+      if: steps.clean_compress.outputs.cache_available == 'true'
+      uses: actions/cache/save@v4
+      with:
+        path: cache_artifacts
+        key: ${{ inputs.cache_key }}-${{ runner.os }}-${{ github.sha }}
+

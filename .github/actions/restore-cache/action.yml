@@ -1,0 +1,72 @@
+name: 'Restore Build Cache'
+description: 'Restore cached build artifacts'
+inputs:
+  cache_key:
+    description: 'Cache key prefix'
+    required: true
+outputs:
+  cache-hit:
+    description: 'Whether cache was hit'
+    value: ${{ steps.restore.outputs.cache-hit }}
+runs:
+  using: composite
+  steps:
+    - name: Restore cache
+      id: restore
+      uses: actions/cache/restore@v4
+      with:
+        path: cache_artifacts
+        key: ${{ inputs.cache_key }}-${{ runner.os }}-${{ github.sha }}
+        restore-keys: |
+          ${{ inputs.cache_key }}-${{ runner.os }}-
+
+    - name: Extract cached artifacts
+      if: steps.restore.outputs.cache-hit == 'true'
+      shell: bash
+      run: |
+        if [ -d "cache_artifacts" ]; then
+          for file in cache_artifacts/*.tar.zst; do
+            if [ -f "$file" ]; then
+              filename=$(basename "$file" .tar.zst)
+              case "$filename" in
+                ccache)
+                  tar --use-compress-program='zstd -T0' -xf "$file"
+                  echo "Extracted .ccache"
+                  ;;
+                build_dir_host)
+                  mkdir -p build_dir
+                  tar --use-compress-program='zstd -T0' -xf "$file" -C build_dir
+                  echo "Extracted build_dir/host"
+                  ;;
+                build_dir_*)
+                  dirname=${filename#build_dir_}
+                  mkdir -p build_dir
+                  tar --use-compress-program='zstd -T0' -xf "$file" -C build_dir
+                  echo "Extracted build_dir/$dirname"
+                  ;;
+                dl)
+                  tar --use-compress-program='zstd -T0' -xf "$file"
+                  echo "Extracted dl"
+                  ;;
+                staging_dir_host)
+                  mkdir -p staging_dir
+                  tar --use-compress-program='zstd -T0' -xf "$file" -C staging_dir
+                  echo "Extracted staging_dir/host"
+                  ;;
+                staging_dir_*)
+                  dirname=${filename#staging_dir_}
+                  mkdir -p staging_dir
+                  tar --use-compress-program='zstd -T0' -xf "$file" -C staging_dir
+                  echo "Extracted staging_dir/$dirname"
+                  ;;
+                linux_*)
+                  dirname=${filename#linux_}
+                  mkdir -p build_dir/target-x86_64_musl/linux-x86_64
+                  tar --use-compress-program='zstd -T0' -xf "$file" -C build_dir/target-x86_64_musl/linux-x86_64
+                  echo "Extracted build_dir/target-x86_64_musl/linux-x86_64/$dirname"
+                  ;;
+              esac
+            fi
+          done
+        fi
+
