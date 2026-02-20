@@ -96,9 +96,8 @@ jobs:
 
       - name: Download packages
         run: |
-          wget https://github.com/$GITHUB_REPOSITORY/raw/refs/heads/main/setmirrors.py
-          python3 setmirrors.py
-          make download V=s -j1
+          python3 CI/setmirrors.py
+          make download -j16 || make download V=s -j4
 
       - name: Patch
         run: |
