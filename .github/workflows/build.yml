@@ -11,6 +11,20 @@ on:
   schedule:
     - cron: '0 20 * * 0'
 
+permissions:
+  contents: write
+  pull-requests: write
+
+concurrency:
+  group: openwrt-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  UPSTREAM_REPOSITORY: immortalwrt/immortalwrt
+  UPSTREAM_REF: master
+  TARGET_DIR: bin/targets/x86/64
+  DOWNLOAD_JOBS: 16
+
 jobs:
   check_update:
     name: Check Update
@@ -22,15 +36,33 @@ jobs:
     steps:
       - name: Check
         id: check_update
+        env:
+          GH_TOKEN: ${{ github.token }}
         run: |
-          export current=$(curl -s "https://api.github.com/repos/$GITHUB_REPOSITORY/releases/latest" | jq -r '.body' | sed -n '2{s/.*\.\.\.//;p}' | tr -d '\r\n')
-          echo "current=$current" | tee -a $GITHUB_OUTPUT
-          echo "latest=$(curl -s 'https://api.github.com/repos/immortalwrt/immortalwrt/commits/master' | jq -r '.sha' | cut -c1-7)" | tee -a $GITHUB_OUTPUT
-          echo "release_tag=$(curl -s 'https://api.github.com/repos/immortalwrt/immortalwrt/tags' | jq -r '.[0].name')" | tee -a $GITHUB_OUTPUT
+          set -euo pipefail
+
+          current=""
+          asset_url="$(gh api "repos/$GITHUB_REPOSITORY/releases/latest" \
+            --jq '.assets[] | select(.name == "fw.json") | .browser_download_url' \
+            2>/dev/null | head -n1 || true)"
+          if [ -n "$asset_url" ]; then
+            current="$(curl --fail --location --retry 3 --silent --show-error "$asset_url" \
+              | jq -r '.source_sha // empty' || true)"
+          fi
+
+          latest="$(gh api "repos/$UPSTREAM_REPOSITORY/commits/$UPSTREAM_REF" --jq '.sha')"
+          release_tag="$(gh api "repos/$UPSTREAM_REPOSITORY/releases/latest" --jq '.tag_name' \
+            2>/dev/null || gh api "repos/$UPSTREAM_REPOSITORY/tags" --jq '.[0].name')"
+          {
+            echo "current=$current"
+            echo "latest=$latest"
+            echo "release_tag=$release_tag"
+          } | tee -a "$GITHUB_OUTPUT"
 
   build_openwrt:
     name: Build OpenWrt Firmware
     runs-on: ubuntu-24.04
+    timeout-minutes: 720
     needs: check_update
     if: needs.check_update.outputs.current != needs.check_update.outputs.latest || github.event_name == 'workflow_dispatch' || github.event_name == 'pull_request'
     env:
@@ -40,13 +72,13 @@ jobs:
         env:
           DEBIAN_FRONTEND: noninteractive
         run: |
-          sudo bash -c 'bash <(curl -s https://build-scripts.immortalwrt.org/init_build_environment.sh)'
-          sudo -E timedatectl set-timezone "Asia/Shanghai"
-          sudo -E apt-get -y autoremove --purge
-          sudo -E apt-get -y clean
+          curl --fail --location --retry 3 --show-error \
+            https://build-scripts.immortalwrt.org/init_build_environment.sh \
+            | sudo -E bash
+          sudo apt-get clean
 
       - name: Maximize build space
-        uses: easimon/maximize-build-space@master
+        uses: easimon/maximize-build-space@v10
         with:
           root-reserve-mb: 8192
           remove-dotnet: true
@@ -56,38 +88,61 @@ jobs:
           remove-docker-images: true
 
       - name: Checkout OpenWrt
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
         with:
-          repository: immortalwrt/immortalwrt
+          repository: ${{ env.UPSTREAM_REPOSITORY }}
+          ref: ${{ needs.check_update.outputs.latest }}
 
       - name: Cache Toolchain
-        uses: klever1988/cachewrtbuild@main
+        # This action publishes no stable tags; pin the audited main revision.
+        uses: klever1988/cachewrtbuild@b729f807837dbc3455d02fd35192660d9b662121
         with:
           ccache: 'true'
           toolchain: 'true'
           mixkey: 'x86_64'
+          skip: 'true'
+          clean: 'false'
 
       - name: Setup Debug Session
         if: github.event.inputs.enable_debug == 'true'
         uses: mxschmitt/action-tmate@v3
 
       - name: Update feeds
+        shell: bash
         run: |
-          sed -i '$a src-git smpackage https://github.com/kenzok8/small-package' feeds.conf.default
+          set -euo pipefail
+          grep -q '^src-git smpackage ' feeds.conf.default \
+            || printf '%s\n' 'src-git smpackage https://github.com/kenzok8/small-package.git' >> feeds.conf.default
           ./scripts/feeds update -a
-          rm -rf feeds/smpackage/{base-files,dnsmasq,firewall*,fullconenat,libnftnl,nftables,ppp,opkg,ucl,upx,vsftpd*,miniupnpd-iptables,wireless-regdb}
-          ./scripts/feeds install -a
+
+          while IFS= read -r feed; do
+            [ "$feed" = "smpackage" ] && continue
+            ./scripts/feeds install -a -p "$feed"
+          done < <(./scripts/feeds list -n)
+
+          # Only expose packages used by this firmware. Installing the whole
+          # third-party feed introduces duplicate packages and Kconfig cycles.
+          ./scripts/feeds install -p smpackage \
+            UnblockNeteaseMusic-Go \
+            luci-app-easytier \
+            luci-app-iperf3-server \
+            luci-app-ota \
+            luci-app-passwall2 \
+            luci-app-unblockmusic
 
       - name: Download configuration file
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
         with:
           path: CI
           
       - name: Configure
+        shell: bash
         run: |
+          set -euo pipefail
           cp CI/.config .
           python3 CI/busybox.py package/utils/busybox/Config-defaults.in
-          export version=$(echo ${{ needs.check_update.outputs.release_tag }} | sed 's/v//')
+          version="${{ needs.check_update.outputs.release_tag }}"
+          version="${version#v}"
           cp .config .config.raw
           echo "CONFIG_VERSION_NUMBER=\"$version\"" >> .config
           echo "CONFIG_VERSION_REPO=\"https://github.com/$GITHUB_REPOSITORY/releases\"" >> .config
@@ -96,76 +151,96 @@ jobs:
 
       - name: Download packages
         run: |
-          python3 CI/setmirrors.py
-          make download -j16 || make download V=s -j4
+          python3 CI/setmirrors.py scripts/projectsmirrors.json
+          make download -j"$DOWNLOAD_JOBS" || make download V=s -j4
 
       - name: Patch
+        shell: bash
         run: |
-          if ! grep -q "CONFIG_X86_SGX" target/linux/x86/64/config-6.12; then
-            echo "# CONFIG_X86_SGX is not set" >> target/linux/x86/64/config-6.12
+          set -euo pipefail
+
+          board="$(sed -n 's/^CONFIG_TARGET_BOARD="\([^"]*\)"/\1/p' .config)"
+          subtarget="$(sed -n 's/^CONFIG_TARGET_SUBTARGET="\([^"]*\)"/\1/p' .config)"
+          if [ "$board" = "x86" ]; then
+            kernel_config="$(find "target/linux/$board/$subtarget" -maxdepth 1 \
+              -type f -name 'config-*' -print -quit)"
+            [ -n "$kernel_config" ] || { echo "Unable to find kernel configuration" >&2; exit 1; }
+            grep -q '^# CONFIG_X86_SGX is not set$' "$kernel_config" \
+              || printf '%s\n' '# CONFIG_X86_SGX is not set' >> "$kernel_config"
           fi
-          export param=$(cat package/base-files/files/usr/lib/os-release | grep BUILD_DATE | sed 's/.*=//')
-          echo "BUILD_DATE=$param" >> package/base-files/files/usr/lib/os-release
-          cat > feeds/smpackage/luci-app-ota/root/etc/config/ota <<EOF
+
+          # Linux 6.18 moved the legacy ip_tables/x_tables modules into
+          # kmod-iptables, while the current kmod-nf-ipt definition still
+          # lists the same files. Keep 6.12 unchanged and avoid the duplicate
+          # ownership only while the affected upstream definition is present.
+          netfilter_makefile="package/kernel/linux/modules/netfilter.mk"
+          if grep -q '^  DEPENDS:=+!LINUX_6_12:kmod-iptables$' "$netfilter_makefile" \
+            && grep -q '^  FILES:=$(foreach mod,$(NF_IPT-m),$(LINUX_DIR)/net/$(mod).ko)$' "$netfilter_makefile"; then
+            sed -i '/^define KernelPackage\/nf-ipt$/,/^endef$/ s|^  FILES:=.*|  FILES:=$(if $(CONFIG_LINUX_6_12),$(foreach mod,$(NF_IPT-m),$(LINUX_DIR)/net/$(mod).ko))|' \
+              "$netfilter_makefile"
+          fi
+
+          ota_dir="$(readlink -f package/feeds/smpackage/luci-app-ota)"
+          install -d "$ota_dir/root/etc/config"
+          cat > "$ota_dir/root/etc/config/ota" <<EOF
 
           config ota 'config'
                   option api_url 'https://github.com/$GITHUB_REPOSITORY/releases/latest/download/fw.json'
           EOF
-          sed -i 's/curl /curl -L /g' feeds/smpackage/luci-app-ota/root/bin/ota
+          sed -i -E 's/(^|[[:space:]])curl[[:space:]]+/\1curl -L /g' "$ota_dir/root/bin/ota"
 
       - name: Compile OpenWrt
-        id: compile1
         run: |
-          alias mkdir='mkdir -p'
-          make -j$(nproc) || echo "result=fail" >> $GITHUB_OUTPUT
-
-      - name: Compile OpenWrt(2)
-        id: compile2
-        if: steps.compile1.outputs.result == 'fail'
-        run: |
-          make V=s -j1 || echo "result=fail" >> $GITHUB_OUTPUT
-
-      - name: Compile OpenWrt(3)
-        if: steps.compile2.outputs.result == 'fail'
-        run: |
-          make V=s -j1
+          make -j"$(nproc)" || make V=s -j1
 
       - name: Clean up
         run: |
-          ls bin/targets/x86/64
+          ls "$TARGET_DIR"
           df -h
 
       - name: Upload buildinfo
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: OpenWrt_buildinfo
           path: ./bin/targets/x86/64/*.buildinfo
+          if-no-files-found: error
+          retention-days: 7
 
       - name: Upload ext4 images
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: OpenWrt_ext4_images
           path: |
             ./bin/targets/x86/64/immortalwrt-x86-64-generic-ext4-combined-efi.*
+          if-no-files-found: error
+          compression-level: 0
+          retention-days: 7
 
       - name: Upload squashfs images
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: OpenWrt_squashfs_images
           path: |
             ./bin/targets/x86/64/immortalwrt-x86-64-generic-squashfs-combined-efi.*
+          if-no-files-found: error
+          compression-level: 0
+          retention-days: 7
 
       - name: Upload rootfs
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: OpenWrt_rootfs
           path: ./bin/targets/x86/64/immortalwrt-x86-64-generic-rootfs.tar.gz
+          if-no-files-found: error
+          compression-level: 0
+          retention-days: 7
 
       - name: Prepare release
         run: |
           mkdir -p release
           cat > release/fw.json <<EOF
           {
+            "source_sha": "${{ needs.check_update.outputs.latest }}",
             "x86_64": [
               {
                 "build_date": "$(./scripts/get_source_date_epoch.sh)",
@@ -177,7 +252,11 @@ jobs:
           EOF
           cat release/fw.json
           echo "**Update Time**: $(date -d @$(./scripts/get_source_date_epoch.sh) -Iseconds)" > changelog.md
-          echo "**Full Changelog**: https://github.com/immortalwrt/immortalwrt/compare/${{ needs.check_update.outputs.current }}...$(git rev-parse --short HEAD)" >> changelog.md
+          if [ -n "${{ needs.check_update.outputs.current }}" ]; then
+            echo "**Full Changelog**: https://github.com/$UPSTREAM_REPOSITORY/compare/${{ needs.check_update.outputs.current }}...${{ needs.check_update.outputs.latest }}" >> changelog.md
+          else
+            echo "**Source Commit**: https://github.com/$UPSTREAM_REPOSITORY/commit/${{ needs.check_update.outputs.latest }}" >> changelog.md
+          fi
           cat changelog.md
           mv ./bin/targets/x86/64/immortalwrt-x86-64-generic-ext4-combined-efi.* release/
           mv ./bin/targets/x86/64/immortalwrt-x86-64-generic-squashfs-combined-efi.* release/
@@ -208,7 +287,7 @@ jobs:
           cp .config CI/
         
       - name: Create Pull Request
-        uses: peter-evans/create-pull-request@v7
+        uses: peter-evans/create-pull-request@v8
         with:
           commit-message: Update .config
           committer: github-actions[bot] <github-actions[bot]@users.noreply.github.com>

@@ -1,183 +1,163 @@
 #!/usr/bin/env python3
-# -*- coding: utf-8 -*-
+"""Enable safe BusyBox defaults referenced by the selected BusyBox applets."""
 
-import sys
-import os
+from __future__ import annotations
 
-def get_source_files(config_in):
-    """读取Config.in文件，获取所有source的文件路径"""
-    source_files = []
-    config_dir = os.path.dirname(config_in)
-    
-    try:
-        with open(config_in, "r") as f:
-            lines = f.readlines()
-        
-        for line in lines:
-            line = line.strip()
-            if line.startswith("source "):
-                source_file = line.split()[1].strip('"')
-                full_path = os.path.join(config_dir, source_file)
-                source_files.append(full_path)
-                print(f"发现source文件: {source_file}")
-    
-    except FileNotFoundError:
-        print(f"警告: {config_in}文件不存在")
-    
-    return source_files
+import argparse
+import re
+from pathlib import Path
 
-def parse_config_file(config_file):
-    """解析配置文件，找到所有default引用，排除choice块中的引用"""
-    referenced_configs = set()
-    
-    try:
-        with open(config_file, "r") as f:
-            lines = f.readlines()
-        
-        in_choice = False
-        for i, line in enumerate(lines):
-            line = line.strip()
-            
-            # 检查是否进入choice块
-            if line == "choice":
-                in_choice = True
-                continue
-            
-            # 检查是否退出choice块
-            if line == "endchoice":
-                in_choice = False
-                continue
-            
-            # 查找类似 "default BUSYBOX_DEFAULT_*" 的行，但排除choice块中的
-            if line.startswith("default BUSYBOX_DEFAULT_") and not in_choice:
-                config_name = line.split()[1]
-                referenced_configs.add(config_name)
-                print(f"发现被引用的配置: {config_name}")
-    
-    except FileNotFoundError:
-        print(f"警告: {config_file}文件不存在")
-    
-    return referenced_configs
 
-def read_config_in_references(config_in):
-    """读取Config.in文件和所有source的文件，找到所有被引用的配置项"""
+SOURCE_RE = re.compile(r'^\s*(source|rsource|osource|orsource)\s+"?([^"\s]+)"?')
+DEFAULT_RE = re.compile(r"^\s*default\s+(BUSYBOX_DEFAULT_[A-Za-z0-9_]+)\b")
+CONFIG_RE = re.compile(r"^\s*(?:menu)?config\s+(\S+)")
+VALUE_RE = re.compile(r"^(\s*default\s+)(\S+)(.*)$")
 
-    # 创建排除列表
-    exclude_list = [
-        "archival",
-        "init",
-        "mailutils",
-        "networking",
-        "selinux",
-        "sysklogd",
-    ]
+SOURCE_EXCLUDES = (
+    "archival",
+    "init",
+    "mailutils",
+    "networking",
+    "selinux",
+    "sysklogd",
+)
 
-    all_referenced_configs = set()
-    
-    # 然后解析所有source的文件
-    source_files = get_source_files(config_in)
-    for source_file in source_files:
-        if any(exclude_item in source_file for exclude_item in exclude_list):
+CONFIG_EXCLUDES = (
+    "_FEATURE_",
+    "_BEEP",
+    "_DEVFSD",
+    "BUSYBOX_DEFAULT_LSBLK",
+)
+
+
+def source_files(config_in: Path) -> list[Path]:
+    """Return recursively sourced Kconfig files, excluding risky applet groups."""
+    source_root = config_in.resolve().parent
+    pending = [config_in.resolve()]
+    visited: set[Path] = set()
+    result: list[Path] = []
+
+    while pending:
+        current = pending.pop()
+        if current in visited:
             continue
-        referenced = parse_config_file(source_file)
-        all_referenced_configs.update(referenced)
-    
-    return all_referenced_configs
+        visited.add(current)
 
-def modify_config(config_defaults_path):
-    # 创建排除列表
-    exclude_list = [
-        "_FEATURE_",
-        "_BEEP",
-        "_DEVFSD",
-    ]
-    
-    # 构造Config.in的路径
-    base_dir = os.path.dirname(config_defaults_path)
-    config_in_path = os.path.join(base_dir, "config", "Config.in")
-    
-    # 读取Config.in中被引用的配置项
-    referenced_configs = read_config_in_references(config_in_path)
-    print(f"总共发现 {len(referenced_configs)} 个被引用的配置项")
-    
-    with open(config_defaults_path, "r") as f:
-        lines = f.readlines()
-    
-    modified_lines = []
-    i = 0
-    modified_count = 0
-    skipped_count = 0
-    excluded_count = 0
-    
-    while i < len(lines):
-        line = lines[i].strip()
-        
-        # 检查是否是config行
-        if line.startswith("config "):
-            config_name = line.split()[1]
-            
-            # 检查下一行是否是bool类型
-            if i + 1 < len(lines) and lines[i + 1].strip() == "bool":
-                # 检查配置名是否包含排除列表中的元素
-                is_excluded = any(exclude_item in config_name for exclude_item in exclude_list)
-                
-                if not is_excluded:
-                    # 检查是否是被Config.in引用的配置项
-                    if config_name in referenced_configs:
-                        # 被引用的配置项需要修改
-                        modified_lines.append(lines[i])
-                        modified_lines.append(lines[i + 1])
-                        
-                        # 检查default行
-                        if i + 2 < len(lines) and lines[i + 2].strip().startswith("default "):
-                            current_default = lines[i + 2].strip().split()[1]
-                            if current_default != "y":
-                                modified_lines.append(f"\tdefault y\n")
-                                modified_count += 1
-                                print(f"修改配置: {config_name} 从 {current_default} 改为 y")
-                            else:
-                                modified_lines.append(lines[i + 2])
-                            i += 3
-                        else:
-                            i += 2
-                    else:
-                        # 不是被引用的配置项，保持不变
-                        modified_lines.append(lines[i])
-                        modified_lines.append(lines[i + 1])
-                        if i + 2 < len(lines) and lines[i + 2].strip().startswith("default "):
-                            modified_lines.append(lines[i + 2])
-                            skipped_count += 1
-                            print(f"保持不变 (未被引用): {config_name}")
-                        i += 3
-                else:
-                    # 在排除列表中的配置，原样保留
-                    modified_lines.append(lines[i])
-                    modified_lines.append(lines[i + 1])
-                    if i + 2 < len(lines) and lines[i + 2].strip().startswith("default "):
-                        modified_lines.append(lines[i + 2])
-                        excluded_count += 1
-                        print(f"保持不变 (排除): {config_name}")
-                    i += 3
-            else:
-                # 非bool类型，原样保留
-                modified_lines.append(lines[i])
-                i += 1
-        else:
-            # 非config行，原样保留
-            modified_lines.append(lines[i])
-            i += 1
-    
-    # 写回文件
-    with open(config_defaults_path, "w") as f:
-        f.writelines(modified_lines)
-    
-    print(f"总共修改了 {modified_count} 个配置项")
-    print(f"保持不变 (未被引用) {skipped_count} 个配置项")
-    print(f"保持不变 (排除列表) {excluded_count} 个配置项")
+        try:
+            lines = current.read_text(encoding="utf-8").splitlines()
+        except FileNotFoundError:
+            continue
+
+        for line in lines:
+            match = SOURCE_RE.match(line)
+            if not match or "$" in match.group(2):
+                continue
+            directive, source_path = match.groups()
+            bases = [current.parent]
+            if directive not in {"rsource", "orsource"} and current.parent != source_root:
+                bases = [source_root, current.parent]
+            candidates = [(base / source_path).resolve() for base in bases]
+            child = next((path for path in candidates if path.is_file()), candidates[0])
+            try:
+                relative_parts = child.relative_to(source_root).parts
+            except ValueError:
+                relative_parts = child.parts
+            if any(part in SOURCE_EXCLUDES for part in relative_parts):
+                continue
+            if child.is_file():
+                result.append(child)
+                pending.append(child)
+
+    return list(dict.fromkeys(result))
+
+
+def referenced_defaults(files: list[Path]) -> set[str]:
+    referenced: set[str] = set()
+    for path in files:
+        choice_depth = 0
+        for line in path.read_text(encoding="utf-8").splitlines():
+            token = line.strip()
+            if token == "choice":
+                choice_depth += 1
+                continue
+            if token == "endchoice":
+                choice_depth = max(0, choice_depth - 1)
+                continue
+            if choice_depth == 0 and (match := DEFAULT_RE.match(line)):
+                referenced.add(match.group(1))
+    return referenced
+
+
+def modify_defaults(defaults_path: Path, config_in: Path, verbose: bool) -> int:
+    if not defaults_path.is_file():
+        raise FileNotFoundError(f"BusyBox defaults file not found: {defaults_path}")
+    if not config_in.is_file():
+        raise FileNotFoundError(f"BusyBox Config.in not found: {config_in}")
+
+    sources = source_files(config_in)
+    referenced = referenced_defaults(sources)
+    lines = defaults_path.read_text(encoding="utf-8").splitlines(keepends=True)
+    modified: list[str] = []
+    changes: list[str] = []
+
+    index = 0
+    while index < len(lines):
+        match = CONFIG_RE.match(lines[index])
+        if not match:
+            modified.append(lines[index])
+            index += 1
+            continue
+
+        end = index + 1
+        while end < len(lines) and not CONFIG_RE.match(lines[end]):
+            end += 1
+        block = lines[index:end]
+        name = match.group(1)
+
+        eligible = (
+            name in referenced
+            and not any(item in name for item in CONFIG_EXCLUDES)
+            and any(line.strip() == "bool" or line.lstrip().startswith("bool ") for line in block)
+        )
+        if eligible:
+            for offset, line in enumerate(block):
+                value = VALUE_RE.match(line.rstrip("\n"))
+                if value and value.group(2) != "y":
+                    newline = "\n" if line.endswith("\n") else ""
+                    block[offset] = f"{value.group(1)}y{value.group(3)}{newline}"
+                    changes.append(name)
+                    break
+
+        modified.extend(block)
+        index = end
+
+    if changes:
+        defaults_path.write_text("".join(modified), encoding="utf-8")
+
+    if verbose:
+        for name in changes:
+            print(f"enabled: {name}")
+    print(
+        f"BusyBox defaults: scanned {len(sources)} files, "
+        f"found {len(referenced)} references, changed {len(changes)} options"
+    )
+    return len(changes)
+
+
+def main() -> None:
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("defaults", type=Path, help="path to Config-defaults.in")
+    parser.add_argument(
+        "--config-in",
+        type=Path,
+        help="path to BusyBox config/Config.in (derived from defaults path by default)",
+    )
+    parser.add_argument("--verbose", action="store_true", help="list modified options")
+    args = parser.parse_args()
+
+    config_in = args.config_in or args.defaults.parent / "config" / "Config.in"
+    modify_defaults(args.defaults, config_in, args.verbose)
+
 
 if __name__ == "__main__":
-    if len(sys.argv) != 2:
-        print("用法: python busybox.py <Config-defaults.in文件路径>")
-        sys.exit(1)
-    modify_config(sys.argv[1])
-    
+    main()
