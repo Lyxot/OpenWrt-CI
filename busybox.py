@@ -29,6 +29,25 @@ CONFIG_EXCLUDES = (
     "BUSYBOX_DEFAULT_LSBLK",
 )
 
+# Full standalone packages selected in .config provide richer implementations
+# of these commands and do not all use OpenWrt's alternatives mechanism.
+CONFIG_EXACT_EXCLUDES = frozenset(
+    {
+        "BUSYBOX_DEFAULT_FUSER",
+        "BUSYBOX_DEFAULT_BLKDISCARD",
+        "BUSYBOX_DEFAULT_FSTRIM",
+        "BUSYBOX_DEFAULT_HDPARM",
+        "BUSYBOX_DEFAULT_LOSETUP",
+        "BUSYBOX_DEFAULT_LSOF",
+        "BUSYBOX_DEFAULT_NSENTER",
+        "BUSYBOX_DEFAULT_PATCH",
+        "BUSYBOX_DEFAULT_POWERTOP",
+        "BUSYBOX_DEFAULT_PSTREE",
+        "BUSYBOX_DEFAULT_UNSHARE",
+        "BUSYBOX_DEFAULT_UUIDGEN",
+    }
+)
+
 
 def source_files(config_in: Path) -> list[Path]:
     """Return recursively sourced Kconfig files, excluding risky applet groups."""
@@ -116,6 +135,7 @@ def modify_defaults(defaults_path: Path, config_in: Path, verbose: bool) -> int:
 
         eligible = (
             name in referenced
+            and name not in CONFIG_EXACT_EXCLUDES
             and not any(item in name for item in CONFIG_EXCLUDES)
             and any(line.strip() == "bool" or line.lstrip().startswith("bool ") for line in block)
         )

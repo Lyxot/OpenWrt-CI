@@ -6,14 +6,15 @@
 每周一自动更新
 
 ## 固件信息
-- 内核版本: 跟随 ImmortalWrt master（当前 Linux 6.18）
+- 内核版本: 跟随 ImmortalWrt master
+- CPU 基线: x86-64-v2
 - 管理地址: 10.1.1.10
 - 分区大小: 64M 内核 + 960M 根分区
 - Argon 主题
 - 编译优化:
-  - O3 编译优化
+  - O2 编译优化
   - LTO 优化
-  - MOLD 链接器
+  - mold 链接器
 - 插件:
   | | | |
   | ------------ | ------------ | ------------ |
@@ -21,14 +22,14 @@
   | 定时重启 | 定时唤醒 | 网络唤醒 |
   | 终端 | 策略路由 | UPNP |
   | iPerf3 服务器 | Daed | WireGuard |
-  | Ksmbd | UnblockMusic (Go) | Diskman |
+  | Ksmbd | QoSify (eBPF + CAKE) | Diskman |
 - 其它:
   - OTA 更新
   - firewall4 防火墙
   - 链路聚合
-  - 更多 busybox 指令
+  - 更多 BusyBox 和常用命令行工具
   - cpupower
   - eBPF
   - qemu-ga
-  - btrfs/zfs
+  - 常用文件系统支持
   - lvm

@@ -8,6 +8,11 @@ on:
         required: false
         type: boolean
         default: false
+      rebuild_toolchain:
+        description: 'Ignore the existing toolchain cache'
+        required: false
+        type: boolean
+        default: false
   schedule:
     - cron: '0 20 * * 0'
 
@@ -24,6 +29,10 @@ env:
   UPSTREAM_REF: master
   TARGET_DIR: bin/targets/x86/64
   DOWNLOAD_JOBS: 16
+  TOOLCHAIN_CACHE_VERSION: v1
+  CCACHE_MAX_SIZE: 2G
+  SCCACHE_CACHE_SIZE: 1G
+  SEGMENT_DOWNLOAD_TIMEOUT_MINS: 15
 
 jobs:
   check_update:
@@ -33,6 +42,7 @@ jobs:
       current: ${{ steps.check_update.outputs.current }}
       latest: ${{ steps.check_update.outputs.latest }}
       release_tag: ${{ steps.check_update.outputs.release_tag }}
+      cache_epoch: ${{ steps.check_update.outputs.cache_epoch }}
     steps:
       - name: Check
         id: check_update
@@ -53,22 +63,37 @@ jobs:
           latest="$(gh api "repos/$UPSTREAM_REPOSITORY/commits/$UPSTREAM_REF" --jq '.sha')"
           release_tag="$(gh api "repos/$UPSTREAM_REPOSITORY/releases/latest" --jq '.tag_name' \
             2>/dev/null || gh api "repos/$UPSTREAM_REPOSITORY/tags" --jq '.[0].name')"
+          cache_epoch="$(date -u +%G-%V)"
           {
             echo "current=$current"
             echo "latest=$latest"
             echo "release_tag=$release_tag"
+            echo "cache_epoch=$cache_epoch"
           } | tee -a "$GITHUB_OUTPUT"
 
-  build_openwrt:
-    name: Build OpenWrt Firmware
+  build_toolchain:
+    name: Build OpenWrt Toolchain
     runs-on: ubuntu-24.04
-    timeout-minutes: 720
+    timeout-minutes: 360
     needs: check_update
     if: needs.check_update.outputs.current != needs.check_update.outputs.latest || github.event_name == 'workflow_dispatch' || github.event_name == 'pull_request'
+    outputs:
+      cache_key: ${{ steps.toolchain_key.outputs.cache_key }}
+      toolchain_id: ${{ steps.toolchain_key.outputs.toolchain_id }}
     env:
       TZ: Asia/Shanghai
     steps:
-      - name: Initialization environment
+      - name: Maximize build space
+        uses: easimon/maximize-build-space@v10
+        with:
+          root-reserve-mb: 4096
+          remove-dotnet: true
+          remove-android: true
+          remove-haskell: true
+          remove-codeql: true
+          remove-docker-images: true
+
+      - name: Initialize environment
         env:
           DEBIAN_FRONTEND: noninteractive
         run: |
@@ -77,6 +102,95 @@ jobs:
             | sudo -E bash
           sudo apt-get clean
 
+      - name: Checkout OpenWrt
+        uses: actions/checkout@v7
+        with:
+          repository: ${{ env.UPSTREAM_REPOSITORY }}
+          ref: ${{ needs.check_update.outputs.latest }}
+
+      - name: Checkout CI configuration
+        uses: actions/checkout@v7
+        with:
+          path: CI
+
+      - name: Prepare configuration
+        run: bash CI/prepare-openwrt.sh CI '${{ needs.check_update.outputs.release_tag }}'
+
+      - name: Calculate toolchain cache key
+        id: toolchain_key
+        shell: bash
+        run: |
+          set -euo pipefail
+          toolchain_source_hash="$(
+            git ls-tree -r HEAD -- \
+              config include toolchain tools \
+              target/linux/generic/kernel-version.mk \
+              target/linux/x86/Makefile \
+              | sha256sum | cut -c1-16
+          )"
+          toolchain_config_hash="$({
+            grep -E '^(CONFIG_PACKAGE_.*=y|CONFIG_(TARGET|CPU|ARCH|TOOLCHAIN|GCC|BINUTILS|LIBC|MUSL|BPF_TOOLCHAIN|HOST_|OPTIMIZE_HOST_TOOLS|USE_MUSL|USE_GLIBC|USE_UCLIBC|USE_LTO|USE_MOLD|USE_GC_SECTIONS|USE_STRIP|USE_SSTRIP|TARGET_OPTIMIZATION|EXTRA_OPTIMIZATION|PKG_ASLR|PKG_CC_STACKPROTECTOR|KERNEL_CC_STACKPROTECTOR|PKG_FORTIFY|PKG_RELRO|PKG_DT_RELR))' .config
+          } | sha256sum | cut -c1-16)"
+          toolchain_id="$RUNNER_OS-openwrt-toolchain-x86_64-$toolchain_source_hash-$toolchain_config_hash-$TOOLCHAIN_CACHE_VERSION"
+          cache_key="$toolchain_id"
+          if [ "${{ github.event.inputs.rebuild_toolchain }}" = "true" ]; then
+            cache_key="$cache_key-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT"
+          fi
+          {
+            echo "toolchain_id=$toolchain_id"
+            echo "cache_key=$cache_key"
+          } | tee -a "$GITHUB_OUTPUT"
+
+      - name: Restore toolchain cache
+        id: toolchain_cache
+        uses: actions/cache/restore@v6
+        with:
+          path: |
+            staging_dir/host*
+            staging_dir/toolchain-*
+          key: ${{ steps.toolchain_key.outputs.cache_key }}
+
+      - name: Compile host tools
+        if: steps.toolchain_cache.outputs.cache-hit != 'true'
+        run: make -j"$(nproc)" tools/install || make -j1 V=s tools/install
+
+      - name: Compile target toolchain
+        if: steps.toolchain_cache.outputs.cache-hit != 'true'
+        run: make -j"$(nproc)" toolchain/install || make -j1 V=s toolchain/install
+
+      - name: Verify toolchain
+        shell: bash
+        run: |
+          set -euo pipefail
+          compgen -G 'staging_dir/host/bin/*' >/dev/null
+          configured_version="$(sed -n 's/^CONFIG_GCC_VERSION="\([^"]*\)"/\1/p' .config)"
+          compiler="$(find staging_dir -path "*/toolchain-*_gcc-${configured_version}_*/bin/*-gcc" -type f -print -quit)"
+          [ -n "$compiler" ] && [ "$("$compiler" -dumpfullversion)" = "$configured_version" ]
+          echo "Verified GCC $configured_version: $compiler"
+          du -sh staging_dir/host* staging_dir/toolchain-*
+
+      - name: Save toolchain cache
+        if: steps.toolchain_cache.outputs.cache-hit != 'true'
+        uses: actions/cache/save@v6
+        with:
+          path: |
+            staging_dir/host*
+            staging_dir/toolchain-*
+          key: ${{ steps.toolchain_key.outputs.cache_key }}
+
+  build_openwrt:
+    name: Build OpenWrt Firmware
+    runs-on: ubuntu-24.04
+    timeout-minutes: 720
+    needs:
+      - check_update
+      - build_toolchain
+    if: needs.check_update.outputs.current != needs.check_update.outputs.latest || github.event_name == 'workflow_dispatch' || github.event_name == 'pull_request'
+    env:
+      TZ: Asia/Shanghai
+      CCACHE_DIR: ${{ github.workspace }}/.ccache
+      SCCACHE_DIR: ${{ github.workspace }}/.sccache
+    steps:
       - name: Maximize build space
         uses: easimon/maximize-build-space@v10
         with:
@@ -87,67 +201,74 @@ jobs:
           remove-codeql: true
           remove-docker-images: true
 
+      - name: Initialize environment
+        env:
+          DEBIAN_FRONTEND: noninteractive
+        run: |
+          curl --fail --location --retry 3 --show-error \
+            https://build-scripts.immortalwrt.org/init_build_environment.sh \
+            | sudo -E bash
+          sudo apt-get install --yes --no-install-recommends sccache
+          sudo apt-get clean
+
       - name: Checkout OpenWrt
         uses: actions/checkout@v7
         with:
           repository: ${{ env.UPSTREAM_REPOSITORY }}
           ref: ${{ needs.check_update.outputs.latest }}
 
-      - name: Cache Toolchain
-        # This action publishes no stable tags; pin the audited main revision.
-        uses: klever1988/cachewrtbuild@b729f807837dbc3455d02fd35192660d9b662121
+      - name: Checkout CI configuration
+        uses: actions/checkout@v7
         with:
-          ccache: 'true'
-          toolchain: 'true'
-          mixkey: 'x86_64'
-          skip: 'true'
-          clean: 'false'
+          path: CI
+
+      - name: Prepare configuration
+        run: bash CI/prepare-openwrt.sh CI '${{ needs.check_update.outputs.release_tag }}'
+
+      - name: Restore required toolchain
+        uses: actions/cache/restore@v6
+        with:
+          path: |
+            staging_dir/host*
+            staging_dir/toolchain-*
+          key: ${{ needs.build_toolchain.outputs.cache_key }}
+          fail-on-cache-miss: true
+
+      - name: Use restored toolchain
+        shell: bash
+        run: |
+          set -euo pipefail
+          configured_version="$(sed -n 's/^CONFIG_GCC_VERSION="\([^"]*\)"/\1/p' .config)"
+          compiler="$(find staging_dir -path "*/toolchain-*_gcc-${configured_version}_*/bin/*-gcc" -type f -print -quit)"
+          [ -n "$compiler" ] && [ "$("$compiler" -dumpfullversion)" = "$configured_version" ]
+          echo "Using cached GCC $configured_version: $compiler"
+          sed -i 's/ $(toolchain\/stamp-compile)//g' Makefile
+          sed -i 's/ $(toolchain\/stamp-install)//g' Makefile
+
+      - name: Restore compiler cache
+        id: ccache_restore
+        uses: actions/cache/restore@v6
+        with:
+          path: |
+            .ccache
+            .sccache
+          key: ${{ needs.build_toolchain.outputs.toolchain_id }}-ccache-${{ needs.check_update.outputs.cache_epoch }}
+          restore-keys: |
+            ${{ needs.build_toolchain.outputs.toolchain_id }}-ccache-
+
+      - name: Configure compiler cache
+        run: |
+          mkdir -p "$CCACHE_DIR" "$SCCACHE_DIR"
+          staging_dir/host/bin/ccache --max-size "$CCACHE_MAX_SIZE"
+          staging_dir/host/bin/ccache --set-config compression=true
+          staging_dir/host/bin/ccache --set-config compression_level=6
+          staging_dir/host/bin/ccache --zero-stats
+          sccache --start-server
+          sccache --zero-stats
 
       - name: Setup Debug Session
         if: github.event.inputs.enable_debug == 'true'
         uses: mxschmitt/action-tmate@v3
-
-      - name: Update feeds
-        shell: bash
-        run: |
-          set -euo pipefail
-          grep -q '^src-git smpackage ' feeds.conf.default \
-            || printf '%s\n' 'src-git smpackage https://github.com/kenzok8/small-package.git' >> feeds.conf.default
-          ./scripts/feeds update -a
-
-          while IFS= read -r feed; do
-            [ "$feed" = "smpackage" ] && continue
-            ./scripts/feeds install -a -p "$feed"
-          done < <(./scripts/feeds list -n)
-
-          # Only expose packages used by this firmware. Installing the whole
-          # third-party feed introduces duplicate packages and Kconfig cycles.
-          ./scripts/feeds install -p smpackage \
-            UnblockNeteaseMusic-Go \
-            luci-app-easytier \
-            luci-app-iperf3-server \
-            luci-app-ota \
-            luci-app-passwall2 \
-            luci-app-unblockmusic
-
-      - name: Download configuration file
-        uses: actions/checkout@v7
-        with:
-          path: CI
-          
-      - name: Configure
-        shell: bash
-        run: |
-          set -euo pipefail
-          cp CI/.config .
-          python3 CI/busybox.py package/utils/busybox/Config-defaults.in
-          version="${{ needs.check_update.outputs.release_tag }}"
-          version="${version#v}"
-          cp .config .config.raw
-          echo "CONFIG_VERSION_NUMBER=\"$version\"" >> .config
-          echo "CONFIG_VERSION_REPO=\"https://github.com/$GITHUB_REPOSITORY/releases\"" >> .config
-          make defconfig
-          diff .config .config.raw | tee .config.diff || :
 
       - name: Download packages
         run: |
@@ -169,17 +290,6 @@ jobs:
               || printf '%s\n' '# CONFIG_X86_SGX is not set' >> "$kernel_config"
           fi
 
-          # Linux 6.18 moved the legacy ip_tables/x_tables modules into
-          # kmod-iptables, while the current kmod-nf-ipt definition still
-          # lists the same files. Keep 6.12 unchanged and avoid the duplicate
-          # ownership only while the affected upstream definition is present.
-          netfilter_makefile="package/kernel/linux/modules/netfilter.mk"
-          if grep -q '^  DEPENDS:=+!LINUX_6_12:kmod-iptables$' "$netfilter_makefile" \
-            && grep -q '^  FILES:=$(foreach mod,$(NF_IPT-m),$(LINUX_DIR)/net/$(mod).ko)$' "$netfilter_makefile"; then
-            sed -i '/^define KernelPackage\/nf-ipt$/,/^endef$/ s|^  FILES:=.*|  FILES:=$(if $(CONFIG_LINUX_6_12),$(foreach mod,$(NF_IPT-m),$(LINUX_DIR)/net/$(mod).ko))|' \
-              "$netfilter_makefile"
-          fi
-
           ota_dir="$(readlink -f package/feeds/smpackage/luci-app-ota)"
           install -d "$ota_dir/root/etc/config"
           cat > "$ota_dir/root/etc/config/ota" <<EOF
@@ -190,8 +300,23 @@ jobs:
           sed -i -E 's/(^|[[:space:]])curl[[:space:]]+/\1curl -L /g' "$ota_dir/root/bin/ota"
 
       - name: Compile OpenWrt
+        run: make -j"$(nproc)" || make V=s -j1
+
+      - name: Report compiler cache
+        if: always()
         run: |
-          make -j"$(nproc)" || make V=s -j1
+          staging_dir/host/bin/ccache --show-stats || true
+          sccache --show-stats || true
+          sccache --stop-server || true
+
+      - name: Save compiler cache
+        if: always() && steps.ccache_restore.outcome == 'success' && steps.ccache_restore.outputs.cache-hit != 'true'
+        uses: actions/cache/save@v6
+        with:
+          path: |
+            .ccache
+            .sccache
+          key: ${{ needs.build_toolchain.outputs.toolchain_id }}-ccache-${{ needs.check_update.outputs.cache_epoch }}
 
       - name: Clean up
         run: |
@@ -267,25 +392,25 @@ jobs:
         if: github.ref_name == 'main' && github.event_name != 'pull_request'
         with:
           allowUpdates: true
-          bodyFile: "changelog.md"
+          bodyFile: changelog.md
           removeArtifacts: true
           tag: ${{ needs.check_update.outputs.release_tag }}
           makeLatest: true
           replacesArtifacts: true
           token: ${{ secrets.GITHUB_TOKEN }}
-          artifacts: "release/*"
+          artifacts: release/*
 
       - name: Prepare commit
         run: |
-          sed -i \
-            -e '/^#\? *CONFIG_BINUTILS_USE_VERSION_/d' \
-            -e '/^#\? *CONFIG_GCC_USE_VERSION_/d' \
+          sed -i -E \
+            -e '/^#? *CONFIG_BINUTILS_USE_VERSION_/d' \
+            -e '/^#? *CONFIG_GCC_USE_VERSION_/d' \
             -e '/^CONFIG_BINUTILS_VERSION/d' \
             -e '/^CONFIG_GCC_VERSION/d' \
             -e '/^CONFIG_VERSION_/d' \
             .config
           cp .config CI/
-        
+
       - name: Create Pull Request
         uses: peter-evans/create-pull-request@v8
         with:
