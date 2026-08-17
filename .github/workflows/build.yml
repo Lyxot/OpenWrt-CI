@@ -9,7 +9,7 @@ on:
         type: boolean
         default: false
       rebuild_toolchain:
-        description: 'Ignore the existing toolchain cache'
+        description: 'Ignore the existing tools and toolchain caches'
         required: false
         type: boolean
         default: false
@@ -29,7 +29,8 @@ env:
   UPSTREAM_REF: master
   TARGET_DIR: bin/targets/x86/64
   DOWNLOAD_JOBS: 16
-  TOOLCHAIN_CACHE_VERSION: v1
+  TOOLS_CACHE_VERSION: v1
+  TOOLCHAIN_CACHE_VERSION: v2
   CCACHE_MAX_SIZE: 2G
   SCCACHE_CACHE_SIZE: 1G
   SEGMENT_DOWNLOAD_TIMEOUT_MINS: 15
@@ -61,8 +62,11 @@ jobs:
           fi
 
           latest="$(gh api "repos/$UPSTREAM_REPOSITORY/commits/$UPSTREAM_REF" --jq '.sha')"
-          release_tag="$(gh api "repos/$UPSTREAM_REPOSITORY/releases/latest" --jq '.tag_name' \
-            2>/dev/null || gh api "repos/$UPSTREAM_REPOSITORY/tags" --jq '.[0].name')"
+          if ! release_tag="$(gh api "repos/$UPSTREAM_REPOSITORY/releases/latest" \
+            --jq '.tag_name' 2>/dev/null)"; then
+            release_tag="$(gh api "repos/$UPSTREAM_REPOSITORY/tags" --jq '.[0].name')"
+          fi
+          [ -n "$release_tag" ] || { echo "Unable to resolve upstream release tag" >&2; exit 1; }
           cache_epoch="$(date -u +%G-%V)"
           {
             echo "current=$current"
@@ -72,12 +76,14 @@ jobs:
           } | tee -a "$GITHUB_OUTPUT"
 
   build_toolchain:
-    name: Build OpenWrt Toolchain
+    name: Build OpenWrt Tools and Toolchain
     runs-on: ubuntu-24.04
     timeout-minutes: 360
     needs: check_update
     if: needs.check_update.outputs.current != needs.check_update.outputs.latest || github.event_name == 'workflow_dispatch' || github.event_name == 'pull_request'
     outputs:
+      tools_cache_key: ${{ steps.tools_key.outputs.cache_key }}
+      tools_id: ${{ steps.tools_key.outputs.tools_id }}
       cache_key: ${{ steps.toolchain_key.outputs.cache_key }}
       toolchain_id: ${{ steps.toolchain_key.outputs.toolchain_id }}
     env:
@@ -100,6 +106,7 @@ jobs:
           curl --fail --location --retry 3 --show-error \
             https://build-scripts.immortalwrt.org/init_build_environment.sh \
             | sudo -E bash
+          sudo env DEBIAN_FRONTEND=noninteractive dpkg --configure -a
           sudo apt-get clean
 
       - name: Checkout OpenWrt
@@ -116,6 +123,67 @@ jobs:
       - name: Prepare configuration
         run: bash CI/prepare-openwrt.sh CI '${{ needs.check_update.outputs.release_tag }}'
 
+      - name: Calculate tools cache key
+        id: tools_key
+        shell: bash
+        run: |
+          set -euo pipefail
+          tools_source_hash="$(
+            git ls-tree -r HEAD -- Makefile config include scripts tools \
+              | sha256sum | cut -c1-16
+          )"
+          tools_config_hash="$({
+            grep -E '^(CONFIG_(TARGET|CPU|ARCH|CCACHE|SDK|DWARVES|BUILD_ALL_HOST_TOOLS|GCC_USE_GRAPHITE|EFI_IMAGES|GRUB_EFI_IMAGES|USE_MOLD|USE_LLVM_BUILD|TARGET_INITRAMFS_COMPRESSION|BRCMSMAC)|CONFIG_PACKAGE_kmod-b43)' .config
+          } | sha256sum | cut -c1-16)"
+          tools_id="$RUNNER_OS-openwrt-tools-x86_64-$tools_source_hash-$tools_config_hash-$TOOLS_CACHE_VERSION"
+          cache_key="$tools_id"
+          if [ "${{ github.event.inputs.rebuild_toolchain }}" = "true" ]; then
+            cache_key="$cache_key-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT"
+          fi
+          {
+            echo "tools_id=$tools_id"
+            echo "cache_key=$cache_key"
+          } | tee -a "$GITHUB_OUTPUT"
+
+      - name: Restore tools cache
+        id: tools_cache
+        uses: actions/cache/restore@v6
+        with:
+          path: staging_dir/host*
+          key: ${{ steps.tools_key.outputs.cache_key }}
+
+      - name: Compile host tools
+        if: steps.tools_cache.outputs.cache-hit != 'true'
+        run: make -j"$(nproc)" tools/install || make -j1 V=s tools/install
+
+      - name: Verify host tools
+        shell: bash
+        run: |
+          set -euo pipefail
+          for tool in ccache cmake fakeroot mkhash mksquashfs4 ninja pkg-config; do
+            [ -x "staging_dir/host/bin/$tool" ] || { echo "Missing host tool: $tool" >&2; exit 1; }
+          done
+          tools_stamp="$(find staging_dir/host/stamp -maxdepth 1 -type f -name '.tools_compile*' -print -quit)"
+          [ -n "$tools_stamp" ] || { echo "Missing host tools completion stamp" >&2; exit 1; }
+          echo "Verified host tools: $tools_stamp"
+          du -sh staging_dir/host*
+
+      - name: Save tools cache
+        if: steps.tools_cache.outputs.cache-hit != 'true'
+        uses: actions/cache/save@v6
+        with:
+          path: staging_dir/host*
+          key: ${{ steps.tools_key.outputs.cache_key }}
+
+      - name: Use prepared host tools
+        shell: bash
+        run: |
+          set -euo pipefail
+          for tool in ccache cmake fakeroot mkhash mksquashfs4 ninja pkg-config; do
+            [ -x "staging_dir/host/bin/$tool" ] || { echo "Missing host tool: $tool" >&2; exit 1; }
+          done
+          sed -i 's/ $(tools\/stamp-compile)//g' Makefile
+
       - name: Calculate toolchain cache key
         id: toolchain_key
         shell: bash
@@ -123,15 +191,15 @@ jobs:
           set -euo pipefail
           toolchain_source_hash="$(
             git ls-tree -r HEAD -- \
-              config include toolchain tools \
+              Makefile config include scripts toolchain \
               target/linux/generic/kernel-version.mk \
               target/linux/x86/Makefile \
               | sha256sum | cut -c1-16
           )"
           toolchain_config_hash="$({
-            grep -E '^(CONFIG_PACKAGE_.*=y|CONFIG_(TARGET|CPU|ARCH|TOOLCHAIN|GCC|BINUTILS|LIBC|MUSL|BPF_TOOLCHAIN|HOST_|OPTIMIZE_HOST_TOOLS|USE_MUSL|USE_GLIBC|USE_UCLIBC|USE_LTO|USE_MOLD|USE_GC_SECTIONS|USE_STRIP|USE_SSTRIP|TARGET_OPTIMIZATION|EXTRA_OPTIMIZATION|PKG_ASLR|PKG_CC_STACKPROTECTOR|KERNEL_CC_STACKPROTECTOR|PKG_FORTIFY|PKG_RELRO|PKG_DT_RELR))' .config
+            grep -E '^(CONFIG_(TARGET|CPU|ARCH|TOOLCHAIN|GCC|BINUTILS|LIBC|MUSL|BPF_TOOLCHAIN|HOST_|OPTIMIZE_HOST_TOOLS|USE_MUSL|USE_GLIBC|USE_UCLIBC|USE_LTO|USE_MOLD|USE_GC_SECTIONS|USE_STRIP|USE_SSTRIP|TARGET_OPTIMIZATION|EXTRA_OPTIMIZATION|PKG_ASLR|PKG_CC_STACKPROTECTOR|KERNEL_CC_STACKPROTECTOR|PKG_FORTIFY|PKG_RELRO|PKG_DT_RELR))' .config
           } | sha256sum | cut -c1-16)"
-          toolchain_id="$RUNNER_OS-openwrt-toolchain-x86_64-$toolchain_source_hash-$toolchain_config_hash-$TOOLCHAIN_CACHE_VERSION"
+          toolchain_id="$RUNNER_OS-openwrt-toolchain-x86_64-${{ steps.tools_key.outputs.tools_id }}-$toolchain_source_hash-$toolchain_config_hash-$TOOLCHAIN_CACHE_VERSION"
           cache_key="$toolchain_id"
           if [ "${{ github.event.inputs.rebuild_toolchain }}" = "true" ]; then
             cache_key="$cache_key-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT"
@@ -145,37 +213,28 @@ jobs:
         id: toolchain_cache
         uses: actions/cache/restore@v6
         with:
-          path: |
-            staging_dir/host*
-            staging_dir/toolchain-*
+          path: staging_dir/toolchain-*
           key: ${{ steps.toolchain_key.outputs.cache_key }}
-
-      - name: Compile host tools
-        if: steps.toolchain_cache.outputs.cache-hit != 'true'
-        run: make -j"$(nproc)" tools/install || make -j1 V=s tools/install
 
       - name: Compile target toolchain
         if: steps.toolchain_cache.outputs.cache-hit != 'true'
         run: make -j"$(nproc)" toolchain/install || make -j1 V=s toolchain/install
 
-      - name: Verify toolchain
+      - name: Verify target toolchain
         shell: bash
         run: |
           set -euo pipefail
-          compgen -G 'staging_dir/host/bin/*' >/dev/null
           configured_version="$(sed -n 's/^CONFIG_GCC_VERSION="\([^"]*\)"/\1/p' .config)"
           compiler="$(find staging_dir -path "*/toolchain-*_gcc-${configured_version}_*/bin/*-gcc" -type f -print -quit)"
           [ -n "$compiler" ] && [ "$("$compiler" -dumpfullversion)" = "$configured_version" ]
           echo "Verified GCC $configured_version: $compiler"
-          du -sh staging_dir/host* staging_dir/toolchain-*
+          du -sh staging_dir/toolchain-*
 
       - name: Save toolchain cache
         if: steps.toolchain_cache.outputs.cache-hit != 'true'
         uses: actions/cache/save@v6
         with:
-          path: |
-            staging_dir/host*
-            staging_dir/toolchain-*
+          path: staging_dir/toolchain-*
           key: ${{ steps.toolchain_key.outputs.cache_key }}
 
   build_openwrt:
@@ -208,7 +267,8 @@ jobs:
           curl --fail --location --retry 3 --show-error \
             https://build-scripts.immortalwrt.org/init_build_environment.sh \
             | sudo -E bash
-          sudo apt-get install --yes --no-install-recommends sccache
+          sudo env DEBIAN_FRONTEND=noninteractive dpkg --configure -a
+          sudo apt-get install --yes --no-install-recommends qemu-utils sccache
           sudo apt-get clean
 
       - name: Checkout OpenWrt
@@ -225,23 +285,32 @@ jobs:
       - name: Prepare configuration
         run: bash CI/prepare-openwrt.sh CI '${{ needs.check_update.outputs.release_tag }}'
 
+      - name: Restore required host tools
+        uses: actions/cache/restore@v6
+        with:
+          path: staging_dir/host*
+          key: ${{ needs.build_toolchain.outputs.tools_cache_key }}
+          fail-on-cache-miss: true
+
       - name: Restore required toolchain
         uses: actions/cache/restore@v6
         with:
-          path: |
-            staging_dir/host*
-            staging_dir/toolchain-*
+          path: staging_dir/toolchain-*
           key: ${{ needs.build_toolchain.outputs.cache_key }}
           fail-on-cache-miss: true
 
-      - name: Use restored toolchain
+      - name: Use restored tools and toolchain
         shell: bash
         run: |
           set -euo pipefail
+          for tool in ccache cmake fakeroot mkhash mksquashfs4 ninja pkg-config; do
+            [ -x "staging_dir/host/bin/$tool" ] || { echo "Missing host tool: $tool" >&2; exit 1; }
+          done
           configured_version="$(sed -n 's/^CONFIG_GCC_VERSION="\([^"]*\)"/\1/p' .config)"
           compiler="$(find staging_dir -path "*/toolchain-*_gcc-${configured_version}_*/bin/*-gcc" -type f -print -quit)"
           [ -n "$compiler" ] && [ "$("$compiler" -dumpfullversion)" = "$configured_version" ]
           echo "Using cached GCC $configured_version: $compiler"
+          sed -i 's/ $(tools\/stamp-compile)//g' Makefile
           sed -i 's/ $(toolchain\/stamp-compile)//g' Makefile
           sed -i 's/ $(toolchain\/stamp-install)//g' Makefile
 
