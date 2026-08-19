@@ -163,7 +163,7 @@ jobs:
           for tool in ccache cmake fakeroot mkhash mksquashfs4 ninja pkg-config; do
             [ -x "staging_dir/host/bin/$tool" ] || { echo "Missing host tool: $tool" >&2; exit 1; }
           done
-          tools_stamp="$(find staging_dir/host/stamp -maxdepth 1 -type f -name '.tools_compile*' -print -quit)"
+          tools_stamp="$(find staging_dir/host -maxdepth 1 -type f -name '.tools_compile*' -print -quit)"
           [ -n "$tools_stamp" ] || { echo "Missing host tools completion stamp" >&2; exit 1; }
           echo "Verified host tools: $tools_stamp"
           du -sh staging_dir/host*
