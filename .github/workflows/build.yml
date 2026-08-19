@@ -100,12 +100,21 @@ jobs:
           remove-docker-images: true
 
       - name: Initialize environment
+        timeout-minutes: 45
         env:
           DEBIAN_FRONTEND: noninteractive
         run: |
+          init_script="$RUNNER_TEMP/init_build_environment.sh"
           curl --fail --location --retry 3 --show-error \
-            https://build-scripts.immortalwrt.org/init_build_environment.sh \
-            | sudo -E bash
+            --connect-timeout 15 --max-time 120 \
+            --output "$init_script" \
+            https://build-scripts.immortalwrt.org/init_build_environment.sh
+          sed -i \
+            -e 's/curl -s "myip.ipip.net"/curl --silent --show-error --connect-timeout 10 --max-time 20 "myip.ipip.net"/' \
+            -e '/^[[:space:]]*apt full-upgrade -y /d' \
+            "$init_script"
+          sudo env DEBIAN_FRONTEND=noninteractive \
+            timeout --kill-after=2m --signal=TERM 40m bash "$init_script"
           sudo env DEBIAN_FRONTEND=noninteractive dpkg --configure -a
           sudo apt-get clean
 
@@ -258,12 +267,21 @@ jobs:
           remove-docker-images: true
 
       - name: Initialize environment
+        timeout-minutes: 45
         env:
           DEBIAN_FRONTEND: noninteractive
         run: |
+          init_script="$RUNNER_TEMP/init_build_environment.sh"
           curl --fail --location --retry 3 --show-error \
-            https://build-scripts.immortalwrt.org/init_build_environment.sh \
-            | sudo -E bash
+            --connect-timeout 15 --max-time 120 \
+            --output "$init_script" \
+            https://build-scripts.immortalwrt.org/init_build_environment.sh
+          sed -i \
+            -e 's/curl -s "myip.ipip.net"/curl --silent --show-error --connect-timeout 10 --max-time 20 "myip.ipip.net"/' \
+            -e '/^[[:space:]]*apt full-upgrade -y /d' \
+            "$init_script"
+          sudo env DEBIAN_FRONTEND=noninteractive \
+            timeout --kill-after=2m --signal=TERM 40m bash "$init_script"
           sudo env DEBIAN_FRONTEND=noninteractive dpkg --configure -a
           sudo apt-get install --yes --no-install-recommends qemu-utils sccache
           sudo apt-get clean
