@@ -13,12 +13,19 @@ on:
         required: false
         type: boolean
         default: false
+  pull_request:
+    paths:
+      - .github/workflows/build.yml
+      - busybox.py
+      - config.patch
+      - prepare-openwrt.sh
+      - patches/**
+      - refresh-config.sh
   schedule:
     - cron: '0 20 * * 0'
 
 permissions:
-  contents: write
-  pull-requests: write
+  contents: read
 
 concurrency:
   group: openwrt-${{ github.workflow }}-${{ github.ref }}
@@ -29,6 +36,7 @@ env:
   UPSTREAM_REF: master
   TARGET_DIR: bin/targets/x86/64
   DOWNLOAD_JOBS: 16
+  MIRROR_PROFILE: global
   TOOLS_CACHE_VERSION: v1
   TOOLCHAIN_CACHE_VERSION: v2
   CCACHE_MAX_SIZE: 2G
@@ -80,12 +88,12 @@ jobs:
     runs-on: ubuntu-24.04
     timeout-minutes: 360
     needs: check_update
-    if: needs.check_update.outputs.current != needs.check_update.outputs.latest || github.event_name == 'workflow_dispatch' || github.event_name == 'pull_request'
     outputs:
       tools_cache_key: ${{ steps.tools_key.outputs.cache_key }}
       tools_id: ${{ steps.tools_key.outputs.tools_id }}
       cache_key: ${{ steps.toolchain_key.outputs.cache_key }}
       toolchain_id: ${{ steps.toolchain_key.outputs.toolchain_id }}
+      config_changed: ${{ steps.refresh_config.outputs.changed }}
     env:
       TZ: Asia/Shanghai
     steps:
@@ -121,6 +129,28 @@ jobs:
 
       - name: Prepare configuration
         run: bash CI/prepare-openwrt.sh CI '${{ needs.check_update.outputs.release_tag }}'
+
+      - name: Refresh configuration patch
+        id: refresh_config
+        run: bash CI/refresh-config.sh CI
+
+      - name: Verify configuration patch
+        if: github.event_name == 'pull_request' && steps.refresh_config.outputs.changed == 'true'
+        run: |
+          git -C CI diff -- config.patch
+          echo "config.patch is not canonical; regenerate it with refresh-config.sh" >&2
+          exit 1
+
+      - name: Upload configuration patch candidate
+        if: >-
+          steps.refresh_config.outputs.changed == 'true' &&
+          github.event_name != 'pull_request'
+        uses: actions/upload-artifact@v7
+        with:
+          name: config-patch-${{ github.run_id }}
+          path: CI/config.patch
+          if-no-files-found: error
+          retention-days: 1
 
       - name: Calculate tools cache key
         id: tools_key
@@ -233,6 +263,40 @@ jobs:
           path: staging_dir/toolchain-*
           key: ${{ steps.toolchain_key.outputs.cache_key }}
 
+  update_config:
+    name: Open Configuration Update PR
+    runs-on: ubuntu-latest
+    needs: build_toolchain
+    if: >-
+      !cancelled() &&
+      needs.build_toolchain.outputs.config_changed == 'true' &&
+      github.event_name != 'pull_request' &&
+      github.ref_name == github.event.repository.default_branch
+    permissions:
+      contents: write
+      pull-requests: write
+    steps:
+      - name: Checkout CI configuration
+        uses: actions/checkout@v7
+
+      - name: Download configuration patch candidate
+        uses: actions/download-artifact@v8
+        with:
+          name: config-patch-${{ github.run_id }}
+          path: .
+
+      - name: Create configuration update pull request
+        uses: peter-evans/create-pull-request@v8
+        with:
+          commit-message: Update configuration patch
+          committer: github-actions[bot] <github-actions[bot]@users.noreply.github.com>
+          author: github-actions[bot] <github-actions[bot]@users.noreply.github.com>
+          title: Update configuration patch
+          body: Regenerate the minimal OpenWrt configuration patch against current upstream defaults.
+          add-paths: config.patch
+          branch: update-config
+          delete-branch: true
+
   build_openwrt:
     name: Build OpenWrt Firmware
     runs-on: ubuntu-24.04
@@ -240,7 +304,6 @@ jobs:
     needs:
       - check_update
       - build_toolchain
-    if: needs.check_update.outputs.current != needs.check_update.outputs.latest || github.event_name == 'workflow_dispatch' || github.event_name == 'pull_request'
     env:
       TZ: Asia/Shanghai
       CCACHE_DIR: ${{ github.workspace }}/.ccache
@@ -451,9 +514,34 @@ jobs:
           mv ./bin/targets/x86/64/immortalwrt-x86-64-generic-squashfs-combined-efi.* release/
           mv ./bin/targets/x86/64/immortalwrt-x86-64-generic-rootfs.tar.gz release/
 
+      - name: Upload release bundle
+        if: github.ref_name == 'main' && github.event_name != 'pull_request'
+        uses: actions/upload-artifact@v7
+        with:
+          name: release-${{ github.run_id }}
+          path: |
+            release/*
+            changelog.md
+          if-no-files-found: error
+          retention-days: 1
+
+  publish_release:
+    name: Publish Release
+    runs-on: ubuntu-latest
+    needs:
+      - check_update
+      - build_openwrt
+    if: github.ref_name == 'main' && github.event_name != 'pull_request'
+    permissions:
+      contents: write
+    steps:
+      - name: Download release bundle
+        uses: actions/download-artifact@v8
+        with:
+          name: release-${{ github.run_id }}
+
       - name: Release
         uses: ncipollo/release-action@v1
-        if: github.ref_name == 'main' && github.event_name != 'pull_request'
         with:
           allowUpdates: true
           bodyFile: changelog.md
@@ -463,26 +551,3 @@ jobs:
           replacesArtifacts: true
           token: ${{ secrets.GITHUB_TOKEN }}
           artifacts: release/*
-
-      - name: Prepare commit
-        run: |
-          sed -i -E \
-            -e '/^#? *CONFIG_BINUTILS_USE_VERSION_/d' \
-            -e '/^#? *CONFIG_GCC_USE_VERSION_/d' \
-            -e '/^CONFIG_BINUTILS_VERSION/d' \
-            -e '/^CONFIG_GCC_VERSION/d' \
-            -e '/^CONFIG_VERSION_/d' \
-            .config
-          cp .config CI/
-
-      - name: Create Pull Request
-        uses: peter-evans/create-pull-request@v8
-        with:
-          commit-message: Update .config
-          committer: github-actions[bot] <github-actions[bot]@users.noreply.github.com>
-          author: github-actions[bot] <github-actions[bot]@users.noreply.github.com>
-          title: Update .config
-          body: Update .config
-          path: CI
-          add-paths: .config
-          branch: update-config

@@ -1,0 +1,7 @@
+diff --git a/include/cmake.mk b/include/cmake.mk
+--- a/include/cmake.mk
++++ b/include/cmake.mk
+@@ -117,1 +117,2 @@ define Build/Configure/Default
+-			-DCMAKE_FIND_ROOT_PATH_MODE_INCLUDE=ONLY \
++			-DCMAKE_FIND_ROOT_PATH_MODE_INCLUDE=ONLY \
++			-DCMAKE_IGNORE_PATH="$(STAGING_DIR_HOST)/include;$(STAGING_DIR_HOST)/lib;$(STAGING_DIR_HOSTPKG)/include;$(STAGING_DIR_HOSTPKG)/lib" \

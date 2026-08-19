@@ -5,11 +5,12 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 from pathlib import Path
 from typing import Any
 
 
-PREFERRED_MIRRORS = {
+GLOBAL_MIRRORS = {
     "@SF": ["https://downloads.sourceforge.net"],
     "@DEBIAN": ["https://ftp.debian.org/debian"],
     "@APACHE": ["https://dlcdn.apache.org", "https://archive.apache.org/dist"],
@@ -37,6 +38,42 @@ PREFERRED_MIRRORS = {
     ],
 }
 
+CN_MIRRORS = {
+    "@DEBIAN": [
+        "https://mirrors.nju.edu.cn/debian",
+        "https://mirrors.ustc.edu.cn/debian",
+        "https://mirrors.tuna.tsinghua.edu.cn/debian",
+        "https://mirrors.aliyun.com/debian",
+        "https://mirrors.tencent.com/debian",
+    ],
+    "@APACHE": [
+        "https://mirrors.nju.edu.cn/apache",
+        "https://mirrors.ustc.edu.cn/apache",
+        "https://mirrors.tuna.tsinghua.edu.cn/apache",
+        "https://mirrors.aliyun.com/apache",
+        "https://mirrors.tencent.com/apache",
+    ],
+    "@GNU": [
+        "https://mirrors.nju.edu.cn/gnu",
+        "https://mirrors.ustc.edu.cn/gnu",
+        "https://mirrors.tuna.tsinghua.edu.cn/gnu",
+        "https://mirrors.aliyun.com/gnu",
+        "https://mirrors.tencent.com/gnu",
+    ],
+    "@KERNEL": [
+        "https://mirror.nju.edu.cn/kernel.org",
+        "https://mirrors.ustc.edu.cn/kernel.org",
+        "https://cdn.kernel.org/pub",
+    ],
+    "@GNOME": ["https://mirror.nju.edu.cn/gnome"],
+}
+
+MIRROR_PROFILES = {
+    "global": GLOBAL_MIRRORS,
+    "cn": CN_MIRRORS,
+    "none": {},
+}
+
 
 def load_mirrors(path: Path) -> dict[str, Any]:
     data = json.loads(path.read_text(encoding="utf-8"))
@@ -48,9 +85,9 @@ def load_mirrors(path: Path) -> dict[str, Any]:
     return data
 
 
-def reorder_mirrors(mirrors: dict[str, Any]) -> int:
+def reorder_mirrors(mirrors: dict[str, Any], preferred_mirrors: dict[str, list[str]]) -> int:
     changed = 0
-    for group, preferred in PREFERRED_MIRRORS.items():
+    for group, preferred in preferred_mirrors.items():
         urls = mirrors.get(group)
         if not isinstance(urls, list):
             continue
@@ -71,16 +108,25 @@ def main() -> None:
         default=Path("scripts/projectsmirrors.json"),
         help="path to projectsmirrors.json",
     )
+    parser.add_argument(
+        "--profile",
+        choices=sorted(MIRROR_PROFILES),
+        default=os.environ.get("MIRROR_PROFILE", "global"),
+        help="mirror ordering profile (default: MIRROR_PROFILE or global)",
+    )
     args = parser.parse_args()
 
     mirrors = load_mirrors(args.path)
-    changed = reorder_mirrors(mirrors)
+    changed = reorder_mirrors(mirrors, MIRROR_PROFILES[args.profile])
     if changed:
         args.path.write_text(
             json.dumps(mirrors, indent=2, ensure_ascii=False) + "\n",
             encoding="utf-8",
         )
-    print(f"Mirror priorities: updated {changed} of {len(mirrors)} groups in {args.path}")
+    print(
+        f"Mirror priorities ({args.profile}): "
+        f"updated {changed} of {len(mirrors)} groups in {args.path}"
+    )
 
 
 if __name__ == "__main__":
