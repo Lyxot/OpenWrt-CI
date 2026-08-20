@@ -41,6 +41,7 @@ env:
   TOOLS_CACHE_VERSION: v1
   TOOLCHAIN_CACHE_VERSION: v2
   CCACHE_MAX_SIZE: 2G
+  SCCACHE_CACHE_SIZE: 1G
   SEGMENT_DOWNLOAD_TIMEOUT_MINS: 15
 
 jobs:
@@ -306,7 +307,7 @@ jobs:
 
       - name: Initialize environment
         timeout-minutes: 45
-        run: bash CI-bootstrap/init-build-environment.sh qemu-utils
+        run: bash CI-bootstrap/init-build-environment.sh qemu-utils sccache
 
       - name: Checkout OpenWrt
         uses: actions/checkout@v7
@@ -355,7 +356,9 @@ jobs:
         id: ccache_restore
         uses: actions/cache/restore@v6
         with:
-          path: .ccache
+          path: |
+            .ccache
+            .sccache
           key: ${{ needs.build_toolchain.outputs.toolchain_id }}-ccache-${{ needs.check_update.outputs.cache_epoch }}-${{ github.run_id }}-${{ github.run_attempt }}
           restore-keys: |
             ${{ needs.build_toolchain.outputs.toolchain_id }}-ccache-${{ needs.check_update.outputs.cache_epoch }}-
@@ -363,11 +366,13 @@ jobs:
 
       - name: Configure compiler cache
         run: |
-          mkdir -p "$CCACHE_DIR"
+          mkdir -p "$CCACHE_DIR" "$SCCACHE_DIR"
           staging_dir/host/bin/ccache --max-size "$CCACHE_MAX_SIZE"
           staging_dir/host/bin/ccache --set-config compression=true
           staging_dir/host/bin/ccache --set-config compression_level=6
           staging_dir/host/bin/ccache --zero-stats
+          sccache --start-server
+          sccache --zero-stats
 
       - name: Setup Debug Session
         if: github.event.inputs.enable_debug == 'true'
@@ -407,13 +412,18 @@ jobs:
 
       - name: Report compiler cache
         if: always()
-        run: staging_dir/host/bin/ccache --show-stats || true
+        run: |
+          staging_dir/host/bin/ccache --show-stats || true
+          sccache --show-stats || true
+          sccache --stop-server || true
 
       - name: Save compiler cache
         if: always() && steps.ccache_restore.outcome == 'success'
         uses: actions/cache/save@v6
         with:
-          path: .ccache
+          path: |
+            .ccache
+            .sccache
           key: ${{ needs.build_toolchain.outputs.toolchain_id }}-ccache-${{ needs.check_update.outputs.cache_epoch }}-${{ github.run_id }}-${{ github.run_attempt }}
 
       - name: Clean up
